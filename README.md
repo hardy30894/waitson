@@ -137,6 +137,14 @@ The test suite is a set of reproducible stuck programs, each with the verdict it
 
 Reproduce it: `./hangbook/run.sh` builds everything and scores the matrix in a container. Scenarios that expose a wrong or missing verdict are the contribution we want most.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hardy30894/waitson/main/install.sh | sh
+```
+
+One static binary, no runtime, no account. Then `waitson doctor` checks attach permissions on your machine.
+
 ## Build from source
 
 ```sh
@@ -145,6 +153,10 @@ cargo build --release        # target/release/waitson
 ```
 
 Linux is the full experience: `/proc` and process memory give waitson every layer, and attaching follows the kernel's normal rules (your own processes with `ptrace_scope 0`, otherwise `sudo` or `CAP_SYS_PTRACE`). macOS runs a native tier with honest edges: thread states, cpu attribution, and socket endpoints come through `libproc` with no sudo at all, so busy/stopped/uninterruptible verdicts work on your own processes out of the box; wait *causes* and Python internals need memory reads, which macOS grants only under sudo; `scan`, `watch`, and name/`:port` targeting are Linux-only for now. Where the cause is invisible, waitson refuses and shows what it did see rather than guessing. `waitson doctor` tells you exactly which tier applies on your machine.
+
+## Contributing
+
+The best contribution is a hang waitson gets wrong, made reproducible as a hangbook scenario. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

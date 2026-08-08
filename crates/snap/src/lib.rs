@@ -590,7 +590,7 @@ mod macos {
         let info = pidinfo::<TaskAllInfo>(pid, 0)
             .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("process exited: {pid} ({e})")))?;
         let tids = listpidinfo::<ListThreads>(pid, info.ptinfo.pti_threadnum as usize)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("cannot list threads: {e}")))?;
+            .map_err(|e| io::Error::other(format!("cannot list threads: {e}")))?;
 
         let mut threads = Vec::new();
         for (i, tid) in tids.iter().enumerate() {

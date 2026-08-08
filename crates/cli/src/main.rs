@@ -18,18 +18,9 @@ fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let json = argv.iter().any(|a| a == "--json");
     match argv.first().map(String::as_str) {
-        Some("doctor") => {
-            doctor();
-            return;
-        }
-        Some("scan") => {
-            scan::scan(json);
-            return;
-        }
-        Some("watch") => {
-            watch::watch(json);
-            return;
-        }
+        Some("doctor") => doctor(),
+        Some("scan") => scan::scan(json),
+        Some("watch") => watch::watch(json),
         Some("snap") => cmd_snap(&argv[1..]),
         Some("judge") => cmd_judge(json),
         Some(_) => diagnose(&argv, json),
