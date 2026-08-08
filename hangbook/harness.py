@@ -32,7 +32,7 @@ SCENARIOS = [
     ("childwait", [sys.executable, "scenarios/childwait.py"], "CAUSAL", [["stopped"]], None),
     ("epollidle", [sys.executable, "scenarios/epollidle.py"], "OBSERVATION", [["idle"], ["asyncio"]], None),
     ("porttarget", [sys.executable, "scenarios/slowdb.py"], "OBSERVATION", [["sleep"]], ":5432"),
-    ("gochan", [f"{BUILD}/gochan"], "PARTIAL", [["goroutine"], ["chan receive"]], None),
+    ("gochan", [f"{BUILD}/gochan"], "PARTIAL", [["goroutine"], ["chan receive"], ["gochan.go:"]], None),
     ("gostripped", [f"{BUILD}/gostripped"], "REFUSAL", [["stripped"]], None),
     ("threadstuck", [sys.executable, "scenarios/threadstuck.py"], "CAUSAL", [["9009"], ["sleep"], ["most-blocked"]], None),
     ("flocked", [sys.executable, "scenarios/flocked.py"], "CAUSAL", [["file lock"], ["held by"], ["lockfile"]], None),

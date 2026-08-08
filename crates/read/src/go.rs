@@ -14,6 +14,7 @@ struct GOffsets {
     atomicstatus: u64,
     waitreason: u64,
     startpc: u64,
+    gopc: u64,
 }
 
 pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
@@ -50,6 +51,11 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
 
     let off = g_offsets(&file).map_err(|e| format!("no DWARF for runtime.g (stripped binary): {e}"))?;
     let reasons = read_wait_reasons(pid, reasons_addr, reasons_size)?;
+    let pcln_data = file
+        .section_by_name(".gopclntab")
+        .or_else(|| file.section_by_name("__gopclntab"))
+        .and_then(|s| s.uncompressed_data().ok());
+    let pcln = pcln_data.as_deref().and_then(crate::pclntab::Pclntab::parse);
 
     let hdr = mem(pid, allgs_addr, 16)?;
     let arr = u64le(&hdr[0..8]);
@@ -66,6 +72,7 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
         let Ok(status_b) = mem(pid, g + off.atomicstatus, 4) else { continue };
         let Ok(reason_b) = mem(pid, g + off.waitreason, 1) else { continue };
         let Ok(startpc_b) = mem(pid, g + off.startpc, 8) else { continue };
+        let Ok(gopc_b) = mem(pid, g + off.gopc, 8) else { continue };
         // 0x1000 is the GC scan bit composed onto the base status.
         let status = u32::from_le_bytes(status_b[0..4].try_into().unwrap()) & !0x1000;
         let status_name = match status {
@@ -85,11 +92,24 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
             String::new()
         };
         let startpc = u64le(&startpc_b).wrapping_sub(bias);
+        let gopc = u64le(&gopc_b).wrapping_sub(bias);
+        // gopc is the return address after the go statement; backing up one
+        // byte lands inside the call itself, the addr2line convention.
+        let source = pcln
+            .as_ref()
+            .and_then(|t| t.resolve(startpc))
+            .map(|(_, file, line)| format!("{}:{line}", short_path(&file)));
+        let spawned_from = pcln
+            .as_ref()
+            .and_then(|t| t.resolve(gopc.wrapping_sub(1)))
+            .map(|(name, file, line)| format!("{name} ({}:{line})", short_path(&file)));
         goroutines.push(GoRoutine {
             goid: u64le(&goid_b),
             status: status_name.to_string(),
             wait_reason,
             func: func_name(&funcs, startpc),
+            source,
+            spawned_from,
         });
     }
     if goroutines.is_empty() {
@@ -122,6 +142,14 @@ fn load_bias(pid: i32, file: &object::File) -> Result<u64, String> {
         .min()
         .ok_or("no load segments")?;
     Ok(base.wrapping_sub(min_vaddr))
+}
+
+fn short_path(path: &str) -> String {
+    let parts: Vec<&str> = path.rsplitn(3, '/').collect();
+    match parts.as_slice() {
+        [file, dir, _rest] => format!("{dir}/{file}"),
+        _ => path.to_string(),
+    }
 }
 
 fn mem(pid: i32, addr: u64, len: usize) -> Result<Vec<u8>, String> {
@@ -217,6 +245,7 @@ fn g_offsets(file: &object::File) -> Result<GOffsets, String> {
                 atomicstatus: get("atomicstatus")?,
                 waitreason: get("waitreason")?,
                 startpc: get("startpc")?,
+                gopc: get("gopc")?,
             });
         }
     }

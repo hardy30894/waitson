@@ -47,9 +47,11 @@ Go programs get diagnosed at the goroutine layer, because that is the only layer
 $ waitson 41610
 waitson: pid 41610 (api) — waiting at the Go level: the main goroutine is blocked in chan receive —
                            4 goroutines blocked, and only an external event can move it (still open: IO wait (main.listen))
-  → 1× chan receive (runtime.main)
-  → 3× chan send (main.worker)
+  → 3× chan send in main.worker (api/worker.go:26), spawned from main.main (api/main.go:31)
+  → 1× IO wait in main.listen (api/server.go:88)
 ```
+
+Which line is stuck and which line started it, resolved from the binary's own gopclntab — the same tables the Go runtime uses to print its own panics.
 
 And when nothing is wrong, it says so, which is also an answer:
 

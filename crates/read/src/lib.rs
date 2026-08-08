@@ -1,6 +1,7 @@
 use waitson_schema::{PyFrame, PySnapshot, PyThread};
 
 mod go;
+mod pclntab;
 mod jvm;
 pub use go::go_snapshot;
 pub use jvm::{jvm_snapshot, looks_java};

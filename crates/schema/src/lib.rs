@@ -156,6 +156,8 @@ pub struct GoRoutine {
     pub status: String,
     pub wait_reason: String,
     pub func: String,
+    pub source: Option<String>,
+    pub spawned_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

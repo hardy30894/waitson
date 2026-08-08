@@ -715,13 +715,26 @@ pub fn judge_go(_s: &Snapshot, go: &GoSnapshot) -> Verdict {
         .collect();
     let waiting: Vec<&&GoRoutine> = user.iter().filter(|g| g.status == "waiting").collect();
 
-    let mut groups: std::collections::BTreeMap<(&str, &str), usize> = Default::default();
+    type Group<'a> = (usize, Option<&'a str>, Option<&'a str>);
+    let mut groups: std::collections::BTreeMap<(&str, &str), Group> = Default::default();
     for g in &waiting {
-        *groups.entry((g.wait_reason.as_str(), g.func.as_str())).or_default() += 1;
+        let e = groups
+            .entry((g.wait_reason.as_str(), g.func.as_str()))
+            .or_insert((0, g.source.as_deref(), g.spawned_from.as_deref()));
+        e.0 += 1;
     }
     let mut summary: Vec<String> = groups
         .iter()
-        .map(|((reason, func), n)| format!("{n}× {reason} ({func})"))
+        .map(|((reason, func), (n, source, spawned))| {
+            let mut line = format!("{n}× {reason} in {func}");
+            if let Some(src) = source {
+                line += &format!(" ({src})");
+            }
+            if let Some(sp) = spawned.filter(|sp| !sp.starts_with("runtime.")) {
+                line += &format!(", spawned from {sp}");
+            }
+            line
+        })
         .collect();
     summary.truncate(6);
     let main_g = go.goroutines.iter().find(|g| g.goid == 1);
@@ -1016,7 +1029,14 @@ mod tests {
     }
 
     fn gor(goid: u64, status: &str, reason: &str, func: &str) -> GoRoutine {
-        GoRoutine { goid, status: status.into(), wait_reason: reason.into(), func: func.into() }
+        GoRoutine {
+            goid,
+            status: status.into(),
+            wait_reason: reason.into(),
+            func: func.into(),
+            source: None,
+            spawned_from: None,
+        }
     }
 
     #[test]
