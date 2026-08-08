@@ -41,6 +41,16 @@ waitson: pid 41522 (deadlock) — deadlock: thread 41522 and thread 41524 each h
   evidence: lock cycle proven from glibc mutex owner fields
 ```
 
+Go programs get diagnosed at the goroutine layer, because that is the only layer that tells the truth for Go. No per-version tables: struct offsets come from the binary's own DWARF, wait-reason names from the runtime's own string table:
+
+```
+$ waitson 41610
+waitson: pid 41610 (api) — waiting at the Go level: the main goroutine is blocked in chan receive —
+                           4 goroutines blocked, and only an external event can move it (still open: IO wait (main.listen))
+  → 1× chan receive (runtime.main)
+  → 3× chan send (main.worker)
+```
+
 And when nothing is wrong, it says so, which is also an answer:
 
 ```
@@ -54,8 +64,11 @@ waitson: pid 41288 (python3) — asyncio event loop is idle — 1 fds registered
 waitson 41337        a pid
 waitson uvicorn      a process name
 waitson :5432        whoever owns that port on this machine
+waitson scan         sweep the whole machine, diagnose what looks stuck in anger
 waitson doctor       explains attach permissions on this machine
 ```
+
+`waitson scan` works in two phases so it stays honest and harmless fleet-wide: a no-attach sweep over kernel facts flags only what looks stuck in anger (uninterruptible sleep that persists, a core burning across the window), then just those suspects get the full diagnosis. On a healthy machine it says so and touches nothing.
 
 A port target is not a network probe: waitson resolves the port to its owning local process and reads that process from inside the machine. When a trail ends at a remote host, the verdict says exactly that, and where to run waitson next.
 
@@ -101,6 +114,9 @@ The test suite is a set of reproducible stuck programs, each with the verdict it
 | wait on a SIGSTOPped child | CAUSAL, resume command given | 0.28s |
 | idle asyncio event loop | OBSERVATION, idle by design | 0.26s |
 | target by `:port` | resolves the owner and diagnoses it | 0.27s |
+| Go channels wedged | PARTIAL, main goroutine's wait reason named | 0.32s |
+| stripped Go binary | REFUSAL, with the rebuild flag that fixes it | 0.26s |
+| machine sweep | `scan` flags the D-state and the busy loop, spares the idle loop | 0.74s |
 
 Reproduce it: `./hangbook/run.sh` builds everything and scores the matrix in a container. Scenarios that expose a wrong or missing verdict are the contribution we want most.
 

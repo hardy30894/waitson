@@ -520,9 +520,9 @@ fn polling(s: &Snapshot, py: Option<&PySnapshot>, subject: &ThreadSnap) -> Verdi
 }
 
 /// Go parks every blocked goroutine behind the netpoller, so kernel-level
-/// facts cannot distinguish a stuck Go program from an idle one. Until the
-/// goroutine reader lands, a verdict here would be a guess.
-pub fn go_refusal(s: &Snapshot) -> Verdict {
+/// facts cannot distinguish a stuck Go program from an idle one. When the
+/// goroutine layer cannot be read, refusing beats guessing.
+pub fn go_refusal(s: &Snapshot, reason: &str) -> Verdict {
     let seen: Vec<String> = s
         .threads
         .iter()
@@ -530,12 +530,99 @@ pub fn go_refusal(s: &Snapshot) -> Verdict {
         .collect();
     verdict(
         VerdictClass::Refusal,
-        "a Go runtime: goroutine stacks are the only truthful layer for Go, and the goroutine reader is not built yet — refusing rather than guessing from the kernel view".into(),
+        format!(
+            "a Go runtime whose goroutines cannot be read ({reason}) — refusing rather than guessing from the kernel view"
+        ),
         vec![
             "Go multiplexes goroutines over threads; a blocked program and an idle one look identical from outside".into(),
-            "the kernel-level facts gathered anyway are in the evidence".into(),
+            "rebuild without -ldflags \"-s -w\" to keep the symbols and DWARF the reader needs".into(),
         ],
         seen,
+    )
+}
+
+/// The goroutine layer is the truth for Go: statuses and wait reasons come
+/// from the runtime's own state, read out of process memory.
+pub fn judge_go(_s: &Snapshot, go: &GoSnapshot) -> Verdict {
+    let internal = |r: &str| {
+        r.starts_with("chan ")
+            || r == "select"
+            || r.starts_with("sync.")
+            || r.starts_with("semacquire")
+            || r.starts_with("wait for GC")
+    };
+    // Runtime housekeeping goroutines (GC helpers, finalizers) park in every
+    // Go program; counting them would make the all-internal deadlock rule
+    // unreachable. goid 1 stays: the main goroutine's func is runtime.main.
+    let user: Vec<&GoRoutine> = go
+        .goroutines
+        .iter()
+        .filter(|g| g.goid == 1 || !g.func.starts_with("runtime."))
+        .collect();
+    let active: Vec<&&GoRoutine> = user
+        .iter()
+        .filter(|g| matches!(g.status.as_str(), "running" | "runnable" | "syscall"))
+        .collect();
+    let waiting: Vec<&&GoRoutine> = user.iter().filter(|g| g.status == "waiting").collect();
+
+    let mut groups: std::collections::BTreeMap<(&str, &str), usize> = Default::default();
+    for g in &waiting {
+        *groups.entry((g.wait_reason.as_str(), g.func.as_str())).or_default() += 1;
+    }
+    let mut summary: Vec<String> = groups
+        .iter()
+        .map(|((reason, func), n)| format!("{n}× {reason} ({func})"))
+        .collect();
+    summary.truncate(6);
+    let main_g = go.goroutines.iter().find(|g| g.goid == 1);
+    let main_desc = main_g
+        .map(|g| match g.status.as_str() {
+            "waiting" => format!("the main goroutine is blocked in {}", g.wait_reason),
+            other => format!("the main goroutine is {other}"),
+        })
+        .unwrap_or_else(|| "the main goroutine is gone".into());
+
+    if !active.is_empty() {
+        return verdict(
+            VerdictClass::Observation,
+            format!(
+                "not stuck at the Go level: {} of {} goroutines are running or runnable — {}",
+                active.len(),
+                user.len(),
+                main_desc
+            ),
+            summary,
+            vec!["goroutine states read from the runtime's own memory".into()],
+        );
+    }
+    if !waiting.is_empty() && waiting.iter().all(|g| internal(&g.wait_reason)) {
+        return verdict(
+            VerdictClass::Causal,
+            format!(
+                "Go-level deadlock: all {} goroutines are blocked on each other and none can run — {}",
+                waiting.len(),
+                main_desc
+            ),
+            summary,
+            vec!["every wait reason is internal (channels/locks); no external event can wake them".into()],
+        );
+    }
+    let external: Vec<String> = waiting
+        .iter()
+        .filter(|g| !internal(&g.wait_reason))
+        .map(|g| format!("{} ({})", g.wait_reason, g.func))
+        .take(3)
+        .collect();
+    verdict(
+        VerdictClass::Partial,
+        format!(
+            "waiting at the Go level: {} — {} goroutines blocked, and only an external event can move it (still open: {})",
+            main_desc,
+            waiting.len(),
+            external.join(", ")
+        ),
+        summary,
+        vec!["goroutine wait reasons read from the runtime's own waitReasonStrings".into()],
     )
 }
 
@@ -740,6 +827,62 @@ mod tests {
             assert_eq!(v.class, VerdictClass::Causal, "wchan {wchan}");
             assert!(v.headline.contains("vfork"));
         }
+    }
+
+    fn gor(goid: u64, status: &str, reason: &str, func: &str) -> GoRoutine {
+        GoRoutine { goid, status: status.into(), wait_reason: reason.into(), func: func.into() }
+    }
+
+    #[test]
+    fn all_internal_waits_is_a_go_deadlock() {
+        let go = GoSnapshot {
+            goroutines: vec![
+                gor(1, "waiting", "chan receive", "runtime.main"),
+                gor(5, "waiting", "chan send", "main.worker"),
+                gor(6, "waiting", "chan send", "main.worker"),
+            ],
+        };
+        let v = judge_go(&snap(1, vec![]), &go);
+        assert_eq!(v.class, VerdictClass::Causal);
+        assert!(v.headline.contains("deadlock"));
+        assert!(v.headline.contains("chan receive"));
+    }
+
+    #[test]
+    fn runtime_housekeeping_cannot_mask_a_go_deadlock() {
+        let go = GoSnapshot {
+            goroutines: vec![
+                gor(1, "waiting", "chan receive", "runtime.main"),
+                gor(2, "waiting", "force gc (idle)", "runtime.forcegchelper"),
+                gor(3, "waiting", "GC sweep wait", "runtime.gcenable.func1"),
+                gor(5, "waiting", "chan send", "main.worker"),
+            ],
+        };
+        let v = judge_go(&snap(1, vec![]), &go);
+        assert_eq!(v.class, VerdictClass::Causal);
+        assert!(v.headline.contains("deadlock"));
+    }
+
+    #[test]
+    fn io_wait_keeps_the_go_verdict_partial() {
+        let go = GoSnapshot {
+            goroutines: vec![
+                gor(1, "waiting", "chan receive", "runtime.main"),
+                gor(7, "waiting", "IO wait", "main.listen"),
+            ],
+        };
+        let v = judge_go(&snap(1, vec![]), &go);
+        assert_eq!(v.class, VerdictClass::Partial);
+        assert!(v.headline.contains("chan receive"));
+    }
+
+    #[test]
+    fn runnable_goroutines_mean_not_stuck() {
+        let go = GoSnapshot {
+            goroutines: vec![gor(1, "running", "", "runtime.main")],
+        };
+        let v = judge_go(&snap(1, vec![]), &go);
+        assert_eq!(v.class, VerdictClass::Observation);
     }
 
     #[test]

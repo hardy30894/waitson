@@ -6,4 +6,7 @@ license.workspace = true
 
 [dependencies]
 waitson-schema.workspace = true
+waitson-snap.workspace = true
 py-spy.workspace = true
+object = "0.36"
+gimli = "0.31"

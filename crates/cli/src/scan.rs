@@ -1,0 +1,85 @@
+//! Fleet triage in two phases: a no-attach sweep over kernel facts flags
+//! the processes that look stuck in anger, then only those suspects get
+//! the full attach pipeline. Everything parked-and-healthy stays untouched.
+use std::collections::BTreeMap;
+use std::fs;
+
+struct Sample {
+    state: char,
+    ticks: u64,
+    comm: String,
+}
+
+pub fn scan(json: bool) {
+    let me = std::process::id() as i32;
+    let first = sweep(me);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let second = sweep(me);
+
+    let mut suspects: Vec<(i32, String, String)> = Vec::new();
+    for (pid, b) in &second {
+        let Some(a) = first.get(pid) else { continue };
+        if a.state == 'D' && b.state == 'D' {
+            suspects.push((*pid, b.comm.clone(), "uninterruptible sleep across the window".into()));
+        } else if a.state == 'R' && b.state == 'R' && b.ticks.saturating_sub(a.ticks) >= 30 {
+            suspects.push((*pid, b.comm.clone(), "a full core burned across the window".into()));
+        }
+    }
+    suspects.truncate(6);
+
+    let mut findings = Vec::new();
+    for (pid, comm, reason) in &suspects {
+        let verdict = waitson_snap::collect(*pid, 150)
+            .map(|s| {
+                let py = waitson_read::python_snapshot(*pid);
+                waitson_judge::judge(&s, &waitson_schema::Links::default(), py.as_ref())
+            })
+            .ok();
+        findings.push((pid, comm, reason, verdict));
+    }
+
+    if json {
+        let rows: Vec<_> = findings
+            .iter()
+            .map(|(pid, comm, reason, v)| {
+                serde_json::json!({
+                    "pid": pid, "comm": comm, "reason": reason,
+                    "verdict": v.as_ref().map(|v| serde_json::json!({"class": v.class, "headline": v.headline})),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "findings": rows })).unwrap());
+        return;
+    }
+    if findings.is_empty() {
+        println!("waitson scan: nothing on this machine looks stuck in anger ({} processes swept)", second.len());
+        return;
+    }
+    println!("waitson scan: {} finding(s) among {} processes:", findings.len(), second.len());
+    for (pid, comm, reason, v) in &findings {
+        println!("  {pid:>7}  {comm:<16} {reason}");
+        if let Some(v) = v {
+            println!("           → {}", v.headline);
+        }
+    }
+}
+
+fn sweep(me: i32) -> BTreeMap<i32, Sample> {
+    let mut out = BTreeMap::new();
+    let Ok(rd) = fs::read_dir("/proc") else { return out };
+    for e in rd.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
+        if pid == me {
+            continue;
+        }
+        // Kernel threads have an empty cmdline; they are the kernel's business.
+        match fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+            Ok(c) if !c.is_empty() => {}
+            _ => continue,
+        }
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+        let Some(st) = waitson_snap::parse_stat(&stat) else { continue };
+        out.insert(pid, Sample { state: st.state, ticks: st.ticks, comm: st.comm });
+    }
+    out
+}

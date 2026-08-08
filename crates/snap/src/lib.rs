@@ -296,6 +296,23 @@ mod linux {
         out
     }
 
+    pub fn read_mem(pid: i32, addr: u64, len: usize) -> Option<Vec<u8>> {
+        if len == 0 || len > 1 << 20 {
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        let local = libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: len,
+        };
+        let remote = libc::iovec {
+            iov_base: addr as *mut libc::c_void,
+            iov_len: len,
+        };
+        let n = unsafe { libc::process_vm_readv(pid, &local, 1, &remote, 1, 0) };
+        (n == len as isize).then_some(buf)
+    }
+
     pub fn socket_inode_owner(inode: u64, exclude: i32) -> Option<(i32, String)> {
         let rd = fs::read_dir("/proc").ok()?;
         for e in rd.flatten() {
@@ -409,7 +426,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{collect, socket_inode_owner};
+pub use linux::{collect, read_mem, socket_inode_owner};
 
 #[cfg(not(target_os = "linux"))]
 pub fn collect(_pid: i32, _window_ms: u64) -> io::Result<Snapshot> {
@@ -421,6 +438,11 @@ pub fn collect(_pid: i32, _window_ms: u64) -> io::Result<Snapshot> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn socket_inode_owner(_inode: u64, _exclude: i32) -> Option<(i32, String)> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn read_mem(_pid: i32, _addr: u64, _len: usize) -> Option<Vec<u8>> {
     None
 }
 

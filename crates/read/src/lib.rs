@@ -1,5 +1,8 @@
 use waitson_schema::{PyFrame, PySnapshot, PyThread};
 
+mod go;
+pub use go::go_snapshot;
+
 pub fn python_snapshot(pid: i32) -> Option<PySnapshot> {
     if !looks_python(pid) {
         return None;

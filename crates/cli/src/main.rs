@@ -1,7 +1,10 @@
 use std::process::exit;
 use waitson_schema::Verdict;
 
+mod scan;
+
 const USAGE: &str = "usage: waitson <pid | name | :port> [--json] [--window-ms N]
+       waitson scan [--json]
        waitson doctor";
 
 fn main() {
@@ -23,6 +26,11 @@ fn main() {
                 doctor();
                 return;
             }
+            "scan" => {
+                let json = args.any(|a| a == "--json");
+                scan::scan(json);
+                return;
+            }
             _ => target = Some(a),
         }
     }
@@ -37,7 +45,10 @@ fn main() {
     let links = waitson_link::resolve(&snap);
     let py = waitson_read::python_snapshot(pid);
     let verdict = if waitson_read::looks_go(pid) {
-        waitson_judge::go_refusal(&snap)
+        match waitson_read::go_snapshot(pid) {
+            Ok(go) => waitson_judge::judge_go(&snap, &go),
+            Err(reason) => waitson_judge::go_refusal(&snap, &reason),
+        }
     } else {
         waitson_judge::judge(&snap, &links, py.as_ref())
     };

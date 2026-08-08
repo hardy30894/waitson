@@ -1,5 +1,5 @@
 FROM rust:slim-bookworm
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libc6-dev python3 procps \
+    && apt-get install -y --no-install-recommends gcc libc6-dev python3 procps golang \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /w

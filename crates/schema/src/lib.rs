@@ -141,6 +141,19 @@ pub struct PySnapshot {
     pub threads: Vec<PyThread>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoRoutine {
+    pub goid: u64,
+    pub status: String,
+    pub wait_reason: String,
+    pub func: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoSnapshot {
+    pub goroutines: Vec<GoRoutine>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum VerdictClass {

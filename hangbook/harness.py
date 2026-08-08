@@ -32,6 +32,8 @@ SCENARIOS = [
     ("childwait", [sys.executable, "scenarios/childwait.py"], "CAUSAL", [["stopped"]], None),
     ("epollidle", [sys.executable, "scenarios/epollidle.py"], "OBSERVATION", [["idle"], ["asyncio"]], None),
     ("porttarget", [sys.executable, "scenarios/slowdb.py"], "OBSERVATION", [["sleep"]], ":5432"),
+    ("gochan", [f"{BUILD}/gochan"], "PARTIAL", [["goroutine"], ["chan receive"]], None),
+    ("gostripped", [f"{BUILD}/gostripped"], "REFUSAL", [["stripped"]], None),
 ]
 
 
@@ -42,6 +44,12 @@ def build_c():
             ["gcc", "-O0", "-pthread", os.path.join(ROOT, "scenarios", f"{src}.c"), "-o", f"{BUILD}/{src}"],
             check=True,
         )
+    goenv = {**os.environ, "GOCACHE": "/tmp/gocache"}
+    src = os.path.join(ROOT, "scenarios", "gochan.go")
+    subprocess.run(["go", "build", "-o", f"{BUILD}/gochan", src], env=goenv, check=True)
+    subprocess.run(
+        ["go", "build", "-ldflags", "-s -w", "-o", f"{BUILD}/gostripped", src], env=goenv, check=True
+    )
 
 
 def read_ready(proc, timeout=10.0):
@@ -100,9 +108,53 @@ def run_one(name, cmd, expected, needles, target_override):
         proc.wait()
 
 
+def run_scan_row():
+    """Launch a D-state hang, a busy loop, and a healthy idle loop; scan
+    must flag the first two and leave the healthy one alone."""
+    row = {"name": "scan", "expected": "FINDINGS", "passed": False}
+    procs = {}
+    try:
+        for name, cmd in [
+            ("dstate", [f"{BUILD}/dstate"]),
+            ("busyloop", [sys.executable, "scenarios/busyloop.py"]),
+            ("epollidle", [sys.executable, "scenarios/epollidle.py"]),
+        ]:
+            p = subprocess.Popen(
+                cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True
+            )
+            procs[name] = (p, read_ready(p))
+        if any(pid is None for _, pid in procs.values()):
+            row["error"] = "a scan scenario never printed READY"
+            return row
+        time.sleep(0.8)
+
+        t0 = time.monotonic()
+        out = subprocess.run([BIN, "scan", "--json"], capture_output=True, text=True, timeout=15)
+        row["seconds"] = round(time.monotonic() - t0, 2)
+        found = {f["pid"] for f in json.loads(out.stdout)["findings"]}
+        flagged_d = procs["dstate"][1] in found
+        flagged_busy = procs["busyloop"][1] in found
+        spared_idle = procs["epollidle"][1] not in found
+        row["class"] = f"flagged {len(found)}"
+        row["headline"] = f"dstate {'flagged' if flagged_d else 'MISSED'}, busyloop {'flagged' if flagged_busy else 'MISSED'}, idle {'spared' if spared_idle else 'WRONGLY FLAGGED'}"
+        row["passed"] = flagged_d and flagged_busy and spared_idle
+        return row
+    except Exception as e:
+        row["error"] = repr(e)
+        return row
+    finally:
+        for p, _ in procs.values():
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            p.wait()
+
+
 def main():
     build_c()
     rows = [run_one(*s) for s in SCENARIOS]
+    rows.append(run_scan_row())
     passed = sum(r["passed"] for r in rows)
 
     print(f"\n{'scenario':<11} {'verdict':<12} {'want':<12} {'time':>5}  result")
