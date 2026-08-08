@@ -87,7 +87,7 @@ def run_one(name, cmd, expected, needles, target_override):
         t0 = time.monotonic()
         out = subprocess.run([BIN, str(target), "--json"], capture_output=True, text=True, timeout=10)
         row["seconds"] = round(time.monotonic() - t0, 2)
-        if out.returncode != 0:
+        if out.returncode not in (0, 1):
             row["error"] = out.stderr.strip()
             return row
 
@@ -214,11 +214,117 @@ def run_watch_row():
                 p.wait()
 
 
+def run_pipes_row():
+    """The blocks compose like pipes: snap | judge must reach the same
+    verdict class offline, with the documented exit code."""
+    row = {"name": "pipes", "expected": "PARTIAL", "passed": False}
+    proc = subprocess.Popen(
+        [sys.executable, "scenarios/slowdb.py"], cwd=ROOT,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+    )
+    try:
+        target = read_ready(proc)
+        if target is None:
+            row["error"] = "scenario never printed READY"
+            return row
+        time.sleep(0.8)
+        t0 = time.monotonic()
+        snap = subprocess.run([BIN, "snap", str(target)], capture_output=True, text=True, timeout=10)
+        judged = subprocess.run(
+            [BIN, "judge", "--json"], input=snap.stdout, capture_output=True, text=True, timeout=10
+        )
+        row["seconds"] = round(time.monotonic() - t0, 2)
+        verdict = json.loads(judged.stdout)
+        row["class"] = verdict["class"]
+        row["headline"] = verdict["headline"]
+        # Offline judging has no live socket hop, so the wire verdict here
+        # is PARTIAL where the live one is CAUSAL; exit code must be 0.
+        row["passed"] = (
+            verdict["class"] == "PARTIAL" and "5432" in judged.stdout and judged.returncode == 0
+        )
+        return row
+    except Exception as e:
+        row["error"] = repr(e)
+        return row
+    finally:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+
+
+def run_overhead_row():
+    """Do-no-harm, measured: diagnosing a throughput-counting target must
+    not dent its rate beyond three sigma of its own baseline noise."""
+    row = {"name": "overhead", "expected": "DO-NO-HARM", "passed": False}
+    proc = subprocess.Popen(
+        [sys.executable, "scenarios/overhead.py"], cwd=ROOT,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+    )
+    try:
+        if read_ready(proc) is None:
+            row["error"] = "scenario never printed READY"
+            return row
+
+        def rates(n):
+            out = []
+            while len(out) < n:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    out.append(int(line))
+                except ValueError:
+                    pass
+            return out
+
+        rates(3)
+        baseline = rates(12)
+        t0 = time.monotonic()
+        collected = []
+
+        def diagnose():
+            for _ in range(4):
+                subprocess.run([BIN, str(proc.pid), "--json"], capture_output=True, timeout=10)
+
+        d = threading.Thread(target=diagnose)
+        d.start()
+        while d.is_alive():
+            collected.extend(rates(1))
+        d.join()
+        row["seconds"] = round(time.monotonic() - t0, 2)
+
+        mean = lambda xs: sum(xs) / len(xs)
+        base_m = mean(baseline)
+        sigma = (mean([(x - base_m) ** 2 for x in baseline])) ** 0.5
+        dur_m = mean(collected) if collected else 0
+        delta_pct = (dur_m - base_m) / base_m * 100
+        row["class"] = "measured"
+        row["headline"] = (
+            f"baseline {base_m:.0f} iters/100ms (sigma {sigma:.0f}), under diagnosis {dur_m:.0f} "
+            f"({delta_pct:+.1f}%), gate: within 3 sigma over {len(collected)} windows x 4 diagnoses"
+        )
+        row["passed"] = bool(collected) and dur_m >= base_m - 3 * sigma
+        return row
+    except Exception as e:
+        row["error"] = repr(e)
+        return row
+    finally:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+
+
 def main():
     build_c()
     rows = [run_one(*s) for s in SCENARIOS]
     rows.append(run_scan_row())
     rows.append(run_watch_row())
+    rows.append(run_pipes_row())
+    rows.append(run_overhead_row())
     passed = sum(r["passed"] for r in rows)
 
     print(f"\n{'scenario':<11} {'verdict':<12} {'want':<12} {'time':>5}  result")

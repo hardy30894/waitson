@@ -1,54 +1,47 @@
+use std::io::Read;
 use std::process::exit;
-use waitson_schema::Verdict;
+use waitson_schema::{Links, Snapshot, Verdict, VerdictClass};
 
 mod scan;
 mod watch;
 
 const USAGE: &str = "usage: waitson <pid | name | :port> [--json] [--window-ms N]
+       waitson snap <pid | name | :port> [--window-ms N]
+       waitson judge [--json]              (reads a snap from stdin)
        waitson scan [--json]
        waitson watch [--json]
-       waitson doctor";
+       waitson doctor
+
+exit codes: 0 a verdict; 1 a refusal; 2 could not run";
 
 fn main() {
-    let mut target: Option<String> = None;
-    let mut json = false;
-    let mut window_ms: u64 = 250;
-
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--json" => json = true,
-            "--window-ms" => {
-                window_ms = args
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or_else(|| die(USAGE));
-            }
-            "doctor" => {
-                doctor();
-                return;
-            }
-            "scan" => {
-                let json = args.any(|a| a == "--json");
-                scan::scan(json);
-                return;
-            }
-            "watch" => {
-                let json = args.any(|a| a == "--json");
-                watch::watch(json);
-                return;
-            }
-            _ => target = Some(a),
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let json = argv.iter().any(|a| a == "--json");
+    match argv.first().map(String::as_str) {
+        Some("doctor") => {
+            doctor();
+            return;
         }
+        Some("scan") => {
+            scan::scan(json);
+            return;
+        }
+        Some("watch") => {
+            watch::watch(json);
+            return;
+        }
+        Some("snap") => cmd_snap(&argv[1..]),
+        Some("judge") => cmd_judge(json),
+        Some(_) => diagnose(&argv, json),
+        None => die(USAGE),
     }
-    let Some(target) = target else { die(USAGE) };
+}
+
+fn diagnose(argv: &[String], json: bool) {
+    let (target, window_ms) = parse_target_args(argv);
     let pid = resolve_target(&target).unwrap_or_else(|e| die(&e));
 
-    let snap = waitson_snap::collect(pid, window_ms).unwrap_or_else(|e| {
-        die(&format!(
-            "waitson: cannot read pid {pid}: {e} (does it exist? permissions may need sudo or CAP_SYS_PTRACE; try `waitson doctor`)"
-        ))
-    });
+    let snap = collect_or_die(pid, window_ms);
     let links = waitson_link::resolve(&snap);
     let py = waitson_read::python_snapshot(pid);
     let verdict = if waitson_read::looks_go(pid) {
@@ -72,6 +65,64 @@ fn main() {
     } else {
         render(pid, &snap.comm, &verdict);
     }
+    exit_by_class(&verdict);
+}
+
+fn cmd_snap(rest: &[String]) {
+    let (target, window_ms) = parse_target_args(rest);
+    let pid = resolve_target(&target).unwrap_or_else(|e| die(&e));
+    let snap = collect_or_die(pid, window_ms);
+    println!("{}", serde_json::to_string_pretty(&snap).unwrap());
+}
+
+fn cmd_judge(json: bool) {
+    let mut body = String::new();
+    if std::io::stdin().read_to_string(&mut body).is_err() || body.trim().is_empty() {
+        die("waitson judge: expected a snap on stdin (waitson snap <target> | waitson judge)");
+    }
+    let snap: Snapshot = serde_json::from_str(&body)
+        .unwrap_or_else(|e| die(&format!("waitson judge: stdin is not a snap: {e}")));
+    // Offline judging: the snap already carries pipe peers and lock holders,
+    // but the live-only enrichments (socket hop, runtime readers) need the
+    // process, so an offline verdict can be broader than a live one.
+    let verdict = waitson_judge::judge(&snap, &Links::default(), None);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&verdict).unwrap());
+    } else {
+        render(snap.pid, &snap.comm, &verdict);
+    }
+    exit_by_class(&verdict);
+}
+
+fn parse_target_args(args: &[String]) -> (String, u64) {
+    let mut target: Option<String> = None;
+    let mut window_ms: u64 = 250;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--json" => {}
+            "--window-ms" => {
+                window_ms = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| die(USAGE));
+            }
+            _ => target = Some(a.clone()),
+        }
+    }
+    (target.unwrap_or_else(|| die(USAGE)), window_ms)
+}
+
+fn collect_or_die(pid: i32, window_ms: u64) -> Snapshot {
+    waitson_snap::collect(pid, window_ms).unwrap_or_else(|e| {
+        die(&format!(
+            "waitson: cannot read pid {pid}: {e} (does it exist? permissions may need sudo or CAP_SYS_PTRACE; try `waitson doctor`)"
+        ))
+    })
+}
+
+fn exit_by_class(v: &Verdict) -> ! {
+    exit(if v.class == VerdictClass::Refusal { 1 } else { 0 })
 }
 
 /// The argument is whatever the user actually knows: a pid, a process

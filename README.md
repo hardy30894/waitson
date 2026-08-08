@@ -83,7 +83,13 @@ Five blocks, one pass, all read-only:
 4. **judge** walks the evidence to a verdict. Deterministic rules, no model, no guessing. The subject is the most-blocked thread, not just the main one, so an idle event loop never hides a stuck worker.
 5. **tell** prints the sentence and the chain. `--json` emits the verdict plus the full wait graph for agents and CI.
 
-Attaching is a brief sample-read-detach. Waitson never writes to the target, never injects, never stops it beyond microsecond samples. It is safe to point at production.
+The blocks compose like pipes: `waitson snap 41337 | waitson judge` captures the evidence in one step and judges it in another, so a snap can be shipped off a production box and judged elsewhere. Offline judging skips the live-only enrichments (the socket hop, the runtime readers) and says so.
+
+Attaching is a brief sample-read-detach. Waitson never writes to the target, never injects, and its impact is measured, not asserted: the hangbook diagnoses a throughput-counting process four times in a row and requires the rate to stay within three sigma of its own baseline noise. Latest run: 1.55M iterations per 100ms baseline, 1.63M during diagnosis. No measurable dent. It is safe to point at production.
+
+## Scripting
+
+Exit codes are part of the contract: `0` a verdict was reached (causal, partial, or observation), `1` a refusal, `2` waitson itself could not run. So `waitson :8000 || alert` does what it reads like, and `--json` output is stable for machines.
 
 ## Verdicts and refusals
 
@@ -120,8 +126,10 @@ The test suite is a set of reproducible stuck programs, each with the verdict it
 | worker stuck behind an idle main thread | CAUSAL, the most-blocked thread is the story | 0.43s |
 | blocked on a file lock | CAUSAL, holder pid and the actual file path named | 0.30s |
 | Java monitor deadlock | CAUSAL, cycle proven from the JVM's own thread dump | 0.53s |
-| machine sweep | `scan` flags D-state, busy loop, and unread socket data; spares the idle loop | 0.92s |
-| hang introduced under `watch` | flagged at onset, unprompted, in under a second | 0.96s |
+| machine sweep | `scan` flags D-state, busy loop, and unread socket data; spares the idle loop | 0.91s |
+| hang introduced under `watch` | flagged at onset, unprompted, in under a second | 0.98s |
+| `snap \| judge` pipeline | same verdict class offline, exit code honored | 0.27s |
+| do-no-harm under 4 diagnoses | target throughput within 3 sigma of its own baseline | measured |
 
 Reproduce it: `./hangbook/run.sh` builds everything and scores the matrix in a container. Scenarios that expose a wrong or missing verdict are the contribution we want most.
 
