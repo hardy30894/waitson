@@ -4,6 +4,7 @@ use waitson_schema::*;
 enum Wait<'a> {
     Futex { owner: Option<i32> },
     OnFd { call: &'a str, fd: i32 },
+    FileLock,
     Child,
     Poll,
     Sleep,
@@ -36,6 +37,7 @@ fn classify(t: &ThreadSnap) -> Wait<'_> {
             call: c,
             fd: t.syscall.as_ref().map(|s| s.args[0] as i32).unwrap_or(-1),
         },
+        Some("flock") => Wait::FileLock,
         Some("wait4") => Wait::Child,
         Some("epoll_pwait" | "epoll_wait" | "poll" | "ppoll" | "select" | "pselect6") => Wait::Poll,
         Some("nanosleep" | "clock_nanosleep") => Wait::Sleep,
@@ -111,7 +113,7 @@ fn decapitalize(s: &str) -> String {
 fn interest(w: &Wait) -> u8 {
     match w {
         Wait::Vfork | Wait::Disk(_) => 6,
-        Wait::Futex { owner: Some(_) } => 5,
+        Wait::Futex { owner: Some(_) } | Wait::FileLock => 5,
         Wait::OnFd { .. } => 4,
         Wait::Child => 3,
         Wait::Futex { owner: None } => 2,
@@ -170,6 +172,7 @@ fn judge_thread(s: &Snapshot, links: &Links, py: Option<&PySnapshot>, subject: &
         Wait::Futex { owner: None } => futex_anonymous(s, py, subject),
         Wait::OnFd { call: "write", fd } => blocked_write(s, subject, fd),
         Wait::OnFd { call, fd } => blocked_read(s, links, subject, call, fd),
+        Wait::FileLock => file_lock_wait(s, subject),
         Wait::Child => waiting_on_child(s, subject),
         Wait::Vfork => vfork_wait(s, subject),
         Wait::Disk(wchan) => verdict(
@@ -421,6 +424,31 @@ fn blocked_write(s: &Snapshot, subject: &ThreadSnap, fd: i32) -> Verdict {
     }
 }
 
+fn file_lock_wait(s: &Snapshot, subject: &ThreadSnap) -> Verdict {
+    let Some(h) = s.lock_holders.first() else {
+        return verdict(
+            VerdictClass::Partial,
+            "waiting on a file lock whose holder is not visible in /proc/locks".into(),
+            vec![format!("thread {} blocked in flock", subject.tid)],
+            vec![],
+        );
+    };
+    let file = h.path.as_deref().unwrap_or("the same file");
+    verdict(
+        VerdictClass::Causal,
+        format!(
+            "waiting on a file lock on {} held by pid {} ({}), which is {}",
+            file, h.pid, h.comm, state_word(h.state)
+        ),
+        vec![
+            format!("thread {} blocked in flock", subject.tid),
+            format!("/proc/locks names pid {} as the holder of that inode", h.pid),
+            format!("the holder is {}; until it unlocks or exits, this wait cannot end", state_word(h.state)),
+        ],
+        vec![],
+    )
+}
+
 fn waiting_on_child(s: &Snapshot, subject: &ThreadSnap) -> Verdict {
     let stopped = s.children.iter().find(|c| c.state == TaskState::Stopped);
     if let Some(c) = stopped {
@@ -555,6 +583,89 @@ fn polling(s: &Snapshot, py: Option<&PySnapshot>, subject: &ThreadSnap) -> Verdi
         "event loop is alive: polling with intermittent work".into(),
         vec![format!("thread {} in the poller; {} ticks burned in the window", subject.tid, total)],
         vec![],
+    )
+}
+
+/// The JVM names its own monitors: a cycle in the blocked-on graph read
+/// from a thread dump is a deadlock by the JVM's own account.
+pub fn judge_jvm(_s: &Snapshot, jvm: &JvmSnapshot) -> Verdict {
+    use std::collections::BTreeMap;
+    let mut owner_of: BTreeMap<&str, &str> = BTreeMap::new();
+    for t in &jvm.threads {
+        for addr in &t.locked {
+            owner_of.insert(addr.as_str(), t.name.as_str());
+        }
+    }
+    let holder = |t: &JvmThread| {
+        t.waiting_on
+            .as_deref()
+            .and_then(|a| owner_of.get(a).copied())
+            .filter(|h| *h != t.name)
+    };
+    for start in jvm.threads.iter().filter(|t| t.state.starts_with("BLOCKED")) {
+        let mut seen = vec![start.name.as_str()];
+        let mut cur = start;
+        while let Some(next) = holder(cur) {
+            if seen.contains(&next) {
+                return verdict(
+                    VerdictClass::Causal,
+                    format!(
+                        "Java-level deadlock: {} each hold a monitor another is waiting for",
+                        seen.join(" and ")
+                    ),
+                    seen.iter().map(|n| format!("thread \"{n}\" is BLOCKED inside the cycle")).collect(),
+                    vec!["monitor ownership read from the JVM's own thread dump".into()],
+                );
+            }
+            seen.push(next);
+            let Some(n) = jvm.threads.iter().find(|t| t.name == next) else { break };
+            cur = n;
+        }
+    }
+    if let Some(t) = jvm.threads.iter().find(|t| t.state.starts_with("BLOCKED")) {
+        let headline = match holder(t) {
+            Some(h) => {
+                let hstate = jvm
+                    .threads
+                    .iter()
+                    .find(|x| x.name == h)
+                    .map(|x| x.state.clone())
+                    .unwrap_or_default();
+                format!("thread \"{}\" is blocked on a monitor held by \"{h}\", which is {hstate}", t.name)
+            }
+            None => format!("thread \"{}\" is blocked on a monitor whose owner is not in the dump", t.name),
+        };
+        return verdict(
+            VerdictClass::Causal,
+            headline,
+            vec!["monitor ownership read from the JVM's own thread dump".into()],
+            vec![],
+        );
+    }
+    let runnable = jvm.threads.iter().filter(|t| t.state.starts_with("RUNNABLE")).count();
+    verdict(
+        VerdictClass::Observation,
+        format!(
+            "not stuck at the JVM level: {} of {} threads runnable, the rest parked or waiting",
+            runnable,
+            jvm.threads.len()
+        ),
+        vec![],
+        vec![],
+    )
+}
+
+pub fn jvm_refusal(s: &Snapshot, reason: &str) -> Verdict {
+    let seen: Vec<String> = s
+        .threads
+        .iter()
+        .map(|t| format!("tid {} {:?} wchan={}", t.tid, t.state, t.wchan))
+        .collect();
+    verdict(
+        VerdictClass::Refusal,
+        format!("a JVM whose thread dump cannot be taken ({reason}) — refusing rather than guessing from the kernel view"),
+        vec!["JVM monitors and thread states live above the kernel; only a thread dump tells the truth".into()],
+        seen,
     )
 }
 
@@ -708,6 +819,7 @@ mod tests {
             sockets: BTreeMap::new(),
             pipe_peers: BTreeMap::new(),
             children: vec![],
+            lock_holders: vec![],
         }
     }
 
@@ -944,6 +1056,51 @@ mod tests {
         };
         let v = judge_go(&snap(1, vec![]), &go);
         assert_eq!(v.class, VerdictClass::Observation);
+    }
+
+    #[test]
+    fn monitor_cycle_in_a_thread_dump_is_a_java_deadlock() {
+        let jvm = JvmSnapshot {
+            threads: vec![
+                JvmThread {
+                    name: "left".into(),
+                    state: "BLOCKED (on object monitor)".into(),
+                    waiting_on: Some("0xb".into()),
+                    locked: vec!["0xa".into()],
+                },
+                JvmThread {
+                    name: "right".into(),
+                    state: "BLOCKED (on object monitor)".into(),
+                    waiting_on: Some("0xa".into()),
+                    locked: vec!["0xb".into()],
+                },
+            ],
+        };
+        let v = judge_jvm(&snap(1, vec![]), &jvm);
+        assert_eq!(v.class, VerdictClass::Causal);
+        assert!(v.headline.contains("deadlock"));
+        assert!(v.headline.contains("left"));
+    }
+
+    #[test]
+    fn file_lock_names_holder_and_path() {
+        let mut s = snap(1, vec![thread(
+            1,
+            TaskState::Sleeping,
+            "locks_lock_inode_wait",
+            Some(("flock", [3, 0, 0, 0, 0, 0])),
+            None,
+        )]);
+        s.lock_holders = vec![LockHolder {
+            pid: 900,
+            comm: "python3".into(),
+            state: TaskState::Sleeping,
+            path: Some("/tmp/hb/lockfile".into()),
+        }];
+        let v = judge(&s, &Links::default(), None);
+        assert_eq!(v.class, VerdictClass::Causal);
+        assert!(v.headline.contains("900"));
+        assert!(v.headline.contains("lockfile"));
     }
 
     #[test]

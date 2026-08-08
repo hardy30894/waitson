@@ -92,6 +92,14 @@ pub struct PipePeer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockHolder {
+    pub pid: i32,
+    pub comm: String,
+    pub state: TaskState,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub pid: i32,
     pub comm: String,
@@ -102,6 +110,7 @@ pub struct Snapshot {
     pub sockets: BTreeMap<u64, SocketConn>,
     pub pipe_peers: BTreeMap<u64, Vec<PipePeer>>,
     pub children: Vec<ChildSnap>,
+    pub lock_holders: Vec<LockHolder>,
 }
 
 impl Snapshot {
@@ -152,6 +161,19 @@ pub struct GoRoutine {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoSnapshot {
     pub goroutines: Vec<GoRoutine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JvmThread {
+    pub name: String,
+    pub state: String,
+    pub waiting_on: Option<String>,
+    pub locked: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JvmSnapshot {
+    pub threads: Vec<JvmThread>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

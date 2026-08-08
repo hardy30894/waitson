@@ -10,12 +10,17 @@ pub fn watch(json: bool) {
         println!("waitson watch: sweeping every 500ms; a finding prints the moment something turns stuck (ctrl-c to stop)");
     }
     let mut prev = crate::scan::sweep(me);
+    let mut prev_rx = crate::scan::rx_map();
     let mut flagged: BTreeSet<i32> = BTreeSet::new();
     loop {
         std::thread::sleep(std::time::Duration::from_millis(500));
         let cur = crate::scan::sweep(me);
+        let cur_rx = crate::scan::rx_map();
         flagged.retain(|pid| cur.contains_key(pid));
-        for (pid, comm, reason) in crate::scan::suspects(&prev, &cur) {
+        let mut found = crate::scan::suspects(&prev, &cur);
+        found.extend(crate::scan::socket_suspects(&prev_rx, &cur_rx, me));
+        prev_rx = cur_rx;
+        for (pid, comm, reason) in found {
             if !flagged.insert(pid) {
                 continue;
             }

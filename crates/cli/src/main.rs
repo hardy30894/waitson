@@ -56,6 +56,11 @@ fn main() {
             Ok(go) => waitson_judge::judge_go(&snap, &go),
             Err(reason) => waitson_judge::go_refusal(&snap, &reason),
         }
+    } else if waitson_read::looks_java(pid) {
+        match waitson_read::jvm_snapshot(pid) {
+            Ok(jvm) => waitson_judge::judge_jvm(&snap, &jvm),
+            Err(reason) => waitson_judge::jvm_refusal(&snap, &reason),
+        }
     } else {
         waitson_judge::judge(&snap, &links, py.as_ref())
     };

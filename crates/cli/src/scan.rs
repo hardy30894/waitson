@@ -28,12 +28,52 @@ pub(crate) fn suspects(
     out
 }
 
+// A tcp receive queue that stays loaded across the window while its owner
+// never drains it is the relational signal: someone is waiting ON this
+// process. udp queues are excluded; they idle nonzero legitimately.
+pub(crate) fn rx_map() -> BTreeMap<u64, u64> {
+    let mut sockets = BTreeMap::new();
+    for file in ["tcp", "tcp6"] {
+        if let Ok(body) = std::fs::read_to_string(format!("/proc/net/{file}")) {
+            waitson_snap::parse_net("tcp", &body, &mut sockets);
+        }
+    }
+    sockets
+        .into_iter()
+        .filter(|(_, c)| c.rx_queue > 0 && c.state == "ESTABLISHED")
+        .map(|(inode, c)| (inode, c.rx_queue))
+        .collect()
+}
+
+pub(crate) fn socket_suspects(
+    first: &BTreeMap<u64, u64>,
+    second: &BTreeMap<u64, u64>,
+    me: i32,
+) -> Vec<(i32, String, String)> {
+    let mut out = Vec::new();
+    for (inode, rx) in second {
+        if !first.contains_key(inode) {
+            continue;
+        }
+        if let Some((pid, comm)) = waitson_snap::socket_inode_owner(*inode, me) {
+            out.push((pid, comm, format!("unread socket data ({rx} bytes waiting)")));
+        }
+    }
+    out
+}
+
 pub fn scan(json: bool) {
     let me = std::process::id() as i32;
     let first = sweep(me);
+    let rx_first = rx_map();
     std::thread::sleep(std::time::Duration::from_millis(400));
     let second = sweep(me);
     let mut suspects = suspects(&first, &second);
+    for s in socket_suspects(&rx_first, &rx_map(), me) {
+        if !suspects.iter().any(|(pid, _, _)| *pid == s.0) {
+            suspects.push(s);
+        }
+    }
     suspects.truncate(6);
 
     let mut findings = Vec::new();

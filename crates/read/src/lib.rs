@@ -1,7 +1,9 @@
 use waitson_schema::{PyFrame, PySnapshot, PyThread};
 
 mod go;
+mod jvm;
 pub use go::go_snapshot;
+pub use jvm::{jvm_snapshot, looks_java};
 
 pub fn python_snapshot(pid: i32) -> Option<PySnapshot> {
     if !looks_python(pid) {

@@ -45,6 +45,7 @@ pub fn syscall_name(nr: i64) -> Option<&'static str> {
         (45, "recvfrom"),
         (47, "recvmsg"),
         (61, "wait4"),
+        (73, "flock"),
         (202, "futex"),
         (219, "restart_syscall"),
         (230, "clock_nanosleep"),
@@ -57,6 +58,7 @@ pub fn syscall_name(nr: i64) -> Option<&'static str> {
     #[cfg(target_arch = "aarch64")]
     let table: &[(i64, &str)] = &[
         (22, "epoll_pwait"),
+        (32, "flock"),
         (63, "read"),
         (64, "write"),
         (72, "pselect6"),
@@ -336,6 +338,56 @@ mod linux {
         None
     }
 
+    // /proc/locks names both sides of every file-lock wait: a "->" row is a
+    // waiter, the plain row on the same dev:inode is the holder. The path is
+    // recovered by matching the inode against the holder's own fd table.
+    fn collect_lock_holders(pid: i32) -> Vec<LockHolder> {
+        let Some(body) = read("/proc/locks".to_string()) else {
+            return Vec::new();
+        };
+        let mut waiting_on: Vec<&str> = Vec::new();
+        for line in body.lines() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() >= 7 && f[1] == "->" && f[5] == pid.to_string() {
+                waiting_on.push(f[6]);
+            }
+        }
+        let mut out = Vec::new();
+        for line in body.lines() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() >= 6 && f[1] != "->" && waiting_on.contains(&f[5]) {
+                let Ok(hpid) = f[4].parse::<i32>() else { continue };
+                if hpid == pid {
+                    continue;
+                }
+                let Some(st) = read(format!("/proc/{hpid}/stat")).as_deref().and_then(parse_stat) else { continue };
+                let inode: u64 = f[5].rsplit(':').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                out.push(LockHolder {
+                    pid: hpid,
+                    comm: st.comm,
+                    state: TaskState::from_code(st.state),
+                    path: path_of_inode(hpid, inode),
+                });
+            }
+        }
+        out
+    }
+
+    fn path_of_inode(pid: i32, inode: u64) -> Option<String> {
+        use std::os::unix::fs::MetadataExt;
+        let rd = fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
+        for e in rd.flatten() {
+            let Ok(target) = fs::read_link(e.path()) else { continue };
+            if !target.to_string_lossy().starts_with('/') {
+                continue;
+            }
+            if fs::metadata(e.path()).is_ok_and(|m| m.ino() == inode) {
+                return Some(target.to_string_lossy().into_owned());
+            }
+        }
+        None
+    }
+
     pub fn collect(pid: i32, window_ms: u64) -> io::Result<Snapshot> {
         let stat = read(format!("/proc/{pid}/stat"))
             .as_deref()
@@ -421,6 +473,7 @@ mod linux {
             sockets: collect_sockets(pid),
             pipe_peers: collect_pipe_peers(&pipe_inodes, pid),
             children: collect_children(pid),
+            lock_holders: collect_lock_holders(pid),
         })
     }
 }

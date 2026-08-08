@@ -35,6 +35,8 @@ SCENARIOS = [
     ("gochan", [f"{BUILD}/gochan"], "PARTIAL", [["goroutine"], ["chan receive"]], None),
     ("gostripped", [f"{BUILD}/gostripped"], "REFUSAL", [["stripped"]], None),
     ("threadstuck", [sys.executable, "scenarios/threadstuck.py"], "CAUSAL", [["9009"], ["sleep"], ["most-blocked"]], None),
+    ("flocked", [sys.executable, "scenarios/flocked.py"], "CAUSAL", [["file lock"], ["held by"], ["lockfile"]], None),
+    ("jdeadlock", ["java", "-cp", BUILD, "Deadlock"], "CAUSAL", [["java-level deadlock"], ["left"], ["right"]], None),
 ]
 
 
@@ -51,6 +53,7 @@ def build_c():
     subprocess.run(
         ["go", "build", "-ldflags", "-s -w", "-o", f"{BUILD}/gostripped", src], env=goenv, check=True
     )
+    subprocess.run(["javac", "-d", BUILD, os.path.join(ROOT, "scenarios", "Deadlock.java")], check=True)
 
 
 def read_ready(proc, timeout=10.0):
@@ -110,14 +113,16 @@ def run_one(name, cmd, expected, needles, target_override):
 
 
 def run_scan_row():
-    """Launch a D-state hang, a busy loop, and a healthy idle loop; scan
-    must flag the first two and leave the healthy one alone."""
+    """Launch a D-state hang, a busy loop, a server sitting on unread
+    socket data, and a healthy idle loop; scan must flag the first three
+    and leave the healthy one alone."""
     row = {"name": "scan", "expected": "FINDINGS", "passed": False}
     procs = {}
     try:
         for name, cmd in [
             ("dstate", [f"{BUILD}/dstate"]),
             ("busyloop", [sys.executable, "scenarios/busyloop.py"]),
+            ("scanunread", [sys.executable, "scenarios/scanunread.py"]),
             ("epollidle", [sys.executable, "scenarios/epollidle.py"]),
         ]:
             p = subprocess.Popen(
@@ -135,10 +140,14 @@ def run_scan_row():
         found = {f["pid"] for f in json.loads(out.stdout)["findings"]}
         flagged_d = procs["dstate"][1] in found
         flagged_busy = procs["busyloop"][1] in found
+        flagged_unread = procs["scanunread"][1] in found
         spared_idle = procs["epollidle"][1] not in found
         row["class"] = f"flagged {len(found)}"
-        row["headline"] = f"dstate {'flagged' if flagged_d else 'MISSED'}, busyloop {'flagged' if flagged_busy else 'MISSED'}, idle {'spared' if spared_idle else 'WRONGLY FLAGGED'}"
-        row["passed"] = flagged_d and flagged_busy and spared_idle
+        row["headline"] = (
+            f"dstate {'flagged' if flagged_d else 'MISSED'}, busyloop {'flagged' if flagged_busy else 'MISSED'}, "
+            f"unread-socket {'flagged' if flagged_unread else 'MISSED'}, idle {'spared' if spared_idle else 'WRONGLY FLAGGED'}"
+        )
+        row["passed"] = flagged_d and flagged_busy and flagged_unread and spared_idle
         return row
     except Exception as e:
         row["error"] = repr(e)
