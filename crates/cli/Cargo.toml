@@ -1,0 +1,16 @@
+[package]
+name = "waitson"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "waitson"
+path = "src/main.rs"
+
+[dependencies]
+waitson-schema.workspace = true
+waitson-snap.workspace = true
+waitson-read.workspace = true
+waitson-judge.workspace = true
+serde_json.workspace = true

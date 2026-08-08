@@ -1,0 +1,9 @@
+[package]
+name = "waitson-snap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+waitson-schema.workspace = true
+libc.workspace = true
