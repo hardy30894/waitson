@@ -478,14 +478,169 @@ mod linux {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::*;
+    use libproc::libproc::file_info::{pidfdinfo, ListFDs, ProcFDType};
+    use libproc::libproc::net_info::{SocketFDInfo, SocketInfoKind};
+    use libproc::libproc::proc_pid::{listpidinfo, name, pidinfo, ListThreads};
+    use libproc::libproc::task_info::TaskAllInfo;
+    use libproc::libproc::thread_info::ThreadInfo;
+    use std::thread;
+    use std::time::Duration;
+
+    // macOS exposes thread run states, cpu time, and socket endpoints to a
+    // same-user caller through libproc; wait *causes* need task_for_pid
+    // (root). This tier maps what is readable into the same Snapshot and
+    // lets the judge refuse honestly where the cause is invisible.
+    fn state_of(run_state: i32) -> TaskState {
+        match run_state {
+            1 => TaskState::Running,
+            2 => TaskState::Stopped,
+            3 => TaskState::Sleeping,
+            4 => TaskState::DiskSleep,
+            5 => TaskState::Dead,
+            other => TaskState::Other(char::from_digit(other as u32 % 10, 10).unwrap_or('?')),
+        }
+    }
+
+    fn thread_ticks(pid: i32) -> Vec<(u64, u64)> {
+        let Ok(info) = pidinfo::<TaskAllInfo>(pid, 0) else {
+            return Vec::new();
+        };
+        let Ok(tids) = listpidinfo::<ListThreads>(pid, info.ptinfo.pti_threadnum as usize) else {
+            return Vec::new();
+        };
+        tids.iter()
+            .filter_map(|tid| {
+                pidinfo::<ThreadInfo>(pid, *tid)
+                    .ok()
+                    .map(|t| (*tid, (t.pth_user_time + t.pth_system_time) / 10_000_000))
+            })
+            .collect()
+    }
+
+    fn v4addr(raw: u32, port: i32) -> String {
+        let b = raw.to_ne_bytes();
+        format!("{}.{}.{}.{}:{}", b[0], b[1], b[2], b[3], port)
+    }
+
+    fn tcp_state(code: i32) -> &'static str {
+        match code {
+            0 => "CLOSED",
+            1 => "LISTEN",
+            2 => "SYN_SENT",
+            4 => "ESTABLISHED",
+            _ => "OTHER",
+        }
+    }
+
+    fn collect_sockets(pid: i32, fds: &mut Vec<FdEntry>, sockets: &mut BTreeMap<u64, SocketConn>) {
+        let Ok(info) = pidinfo::<TaskAllInfo>(pid, 0) else { return };
+        let Ok(list) = listpidinfo::<ListFDs>(pid, info.pbsd.pbi_nfiles as usize) else { return };
+        for fd in list {
+            let kind = match fd.proc_fdtype.into() {
+                ProcFDType::Socket => {
+                    let Ok(sock) = pidfdinfo::<SocketFDInfo>(pid, fd.proc_fd) else {
+                        fds.push(FdEntry { fd: fd.proc_fd, kind: FdKind::Other { desc: "socket".into() }, flags: 0 });
+                        continue;
+                    };
+                    let si = sock.psi;
+                    let key = fd.proc_fd as u64;
+                    match si.soi_kind.into() {
+                        SocketInfoKind::Tcp => {
+                            let tcp = unsafe { si.soi_proto.pri_tcp };
+                            let ini = tcp.tcpsi_ini;
+                            let (l, r) = unsafe {
+                                (
+                                    v4addr(ini.insi_laddr.ina_46.i46a_addr4.s_addr, u16::from_be(ini.insi_lport as u16) as i32),
+                                    v4addr(ini.insi_faddr.ina_46.i46a_addr4.s_addr, u16::from_be(ini.insi_fport as u16) as i32),
+                                )
+                            };
+                            sockets.insert(key, SocketConn {
+                                proto: "tcp".into(),
+                                local: l,
+                                remote: r,
+                                state: tcp_state(tcp.tcpsi_state).to_string(),
+                                tx_queue: si.soi_snd.sbi_cc as u64,
+                                rx_queue: si.soi_rcv.sbi_cc as u64,
+                            });
+                            FdKind::Socket { inode: key }
+                        }
+                        _ => FdKind::Other { desc: "socket".into() },
+                    }
+                }
+                ProcFDType::Pipe => FdKind::Other { desc: "pipe".into() },
+                _ => FdKind::Other { desc: "fd".into() },
+            };
+            fds.push(FdEntry { fd: fd.proc_fd, kind, flags: 0 });
+        }
+        fds.sort_by_key(|e| e.fd);
+    }
+
+    pub fn collect(pid: i32, window_ms: u64) -> io::Result<Snapshot> {
+        let comm = name(pid).map_err(|e| {
+            io::Error::new(io::ErrorKind::NotFound, format!("no such process: {pid} ({e})"))
+        })?;
+        let before: BTreeMap<u64, u64> = thread_ticks(pid).into_iter().collect();
+        let started = std::time::Instant::now();
+        thread::sleep(Duration::from_millis(window_ms));
+        let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
+
+        let info = pidinfo::<TaskAllInfo>(pid, 0)
+            .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("process exited: {pid} ({e})")))?;
+        let tids = listpidinfo::<ListThreads>(pid, info.ptinfo.pti_threadnum as usize)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("cannot list threads: {e}")))?;
+
+        let mut threads = Vec::new();
+        for (i, tid) in tids.iter().enumerate() {
+            let Ok(t) = pidinfo::<ThreadInfo>(pid, *tid) else { continue };
+            let ticks = (t.pth_user_time + t.pth_system_time) / 10_000_000;
+            threads.push(ThreadSnap {
+                // The subject-selection contract keys the main thread by
+                // tid == pid; macOS thread ids are unrelated, so the first
+                // thread carries the pid and the rest keep their ids.
+                tid: if i == 0 { pid } else { *tid as i32 },
+                comm: comm.clone(),
+                state: state_of(t.pth_run_state),
+                wchan: String::new(),
+                syscall: None,
+                cpu_ticks: ticks,
+                cpu_delta: ticks.saturating_sub(before.get(tid).copied().unwrap_or(ticks)),
+                futex_owner: None,
+            });
+        }
+
+        let mut fds = Vec::new();
+        let mut sockets = BTreeMap::new();
+        collect_sockets(pid, &mut fds, &mut sockets);
+
+        Ok(Snapshot {
+            pid,
+            comm,
+            cmdline: String::new(),
+            window_ms: elapsed_ms,
+            threads,
+            fds,
+            sockets,
+            pipe_peers: BTreeMap::new(),
+            children: Vec::new(),
+            lock_holders: Vec::new(),
+        })
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub use linux::{collect, read_mem, socket_inode_owner};
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub use macos::collect;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn collect(_pid: i32, _window_ms: u64) -> io::Result<Snapshot> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "waitson reads /proc; linux only for now (run inside a container on this machine)",
+        "waitson runs on linux and macOS for now",
     ))
 }
 

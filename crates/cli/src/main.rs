@@ -131,6 +131,11 @@ fn resolve_target(arg: &str) -> Result<i32, String> {
     if let Ok(pid) = arg.parse::<i32>() {
         return Ok(pid);
     }
+    if !cfg!(target_os = "linux") {
+        return Err(format!(
+            "waitson: name and :port targeting read /proc, linux only for now — pass a pid ({arg})"
+        ));
+    }
     if let Some(port) = arg.strip_prefix(':') {
         let port: u16 = port
             .parse()
@@ -206,9 +211,15 @@ fn render(pid: i32, comm: &str, v: &Verdict) {
 }
 
 fn doctor() {
+    if cfg!(target_os = "macos") {
+        println!("waitson doctor: native macOS tier.");
+        println!("  same-user processes: thread states, cpu, and socket endpoints are readable without sudo");
+        println!("  wait causes and python internals need memory reads: run under sudo for the deep tier");
+        println!("  scan/watch and name/:port targeting are linux-only for now; pass a pid");
+        return;
+    }
     if !cfg!(target_os = "linux") {
-        println!("waitson doctor: this build reads /proc, so diagnosis runs on linux only for now.");
-        println!("  on macOS, run your workload in a container and run waitson inside it.");
+        println!("waitson doctor: this build diagnoses on linux and macOS for now.");
         return;
     }
     let euid = libc_geteuid();

@@ -63,6 +63,10 @@ pub(crate) fn socket_suspects(
 }
 
 pub fn scan(json: bool) {
+    if !cfg!(target_os = "linux") {
+        eprintln!("waitson scan: the sweep reads /proc, linux only for now");
+        std::process::exit(2);
+    }
     let me = std::process::id() as i32;
     let first = sweep(me);
     let rx_first = rx_map();

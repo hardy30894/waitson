@@ -253,7 +253,7 @@ fn futex_owned(s: &Snapshot, py: Option<&PySnapshot>, subject: &ThreadSnap, owne
     )
 }
 
-fn futex_anonymous(s: &Snapshot, py: Option<&PySnapshot>, subject: &ThreadSnap) -> Verdict {
+fn futex_anonymous(_s: &Snapshot, py: Option<&PySnapshot>, subject: &ThreadSnap) -> Verdict {
     if let Some((os_tid, frame)) = gil_holder(py, subject.tid) {
         let holder = os_tid.map(|t| t.to_string()).unwrap_or_else(|| "?".into());
         return verdict(
@@ -777,15 +777,28 @@ pub fn judge_go(_s: &Snapshot, go: &GoSnapshot) -> Verdict {
 }
 
 fn refusal(s: &Snapshot, subject: &ThreadSnap) -> Verdict {
-    let seen: Vec<String> = s
+    let mut seen: Vec<String> = s
         .threads
         .iter()
         .map(|t| format!("tid {} {:?} wchan={} syscall={}", t.tid, t.state, t.wchan, t.syscall.as_ref().and_then(|x| x.name.as_deref()).unwrap_or("?")))
         .collect();
+    for c in s.sockets.values() {
+        if c.state == "ESTABLISHED" {
+            seen.push(format!(
+                "open connection: {} → {} (rx {}, tx {})",
+                c.local, c.remote, c.rx_queue, c.tx_queue
+            ));
+        }
+    }
+    let where_at = if subject.wchan.is_empty() {
+        format!("main thread {} is {}", subject.tid, state_word(subject.state))
+    } else {
+        format!("main thread {} wchan={}", subject.tid, subject.wchan)
+    };
     verdict(
         VerdictClass::Refusal,
         "no verdict: the wait does not match a known shape — here is everything seen".to_string(),
-        vec![format!("main thread {} wchan={}", subject.tid, subject.wchan)],
+        vec![where_at],
         seen,
     )
 }

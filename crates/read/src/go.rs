@@ -175,8 +175,8 @@ fn g_offsets(file: &object::File) -> Result<GOffsets, String> {
             .and_then(|s| s.uncompressed_data().ok())
             .unwrap_or(Cow::Borrowed(&[])))
     };
-    let dwarf_cow = gimli::Dwarf::load(load).map_err(|e| e.to_string())?;
-    let dwarf = dwarf_cow.borrow(|section| gimli::EndianSlice::new(section, endian));
+    let sections = gimli::DwarfSections::load(load).map_err(|e| e.to_string())?;
+    let dwarf = sections.borrow(|section| gimli::EndianSlice::new(section, endian));
 
     let mut units = dwarf.units();
     while let Some(header) = units.next().map_err(|e| e.to_string())? {

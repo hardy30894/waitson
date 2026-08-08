@@ -1,10 +1,14 @@
 //! Resident sentinel: sweeps kernel facts on a cadence and diagnoses a
 //! process at the moment it turns stuck, once, when it happens. Nothing is
 //! attached until something crosses the same triage rules scan uses.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write;
 
 pub fn watch(json: bool) {
+    if !cfg!(target_os = "linux") {
+        eprintln!("waitson watch: the sweep reads /proc, linux only for now");
+        std::process::exit(2);
+    }
     let me = std::process::id() as i32;
     if !json {
         println!("waitson watch: sweeping every 500ms; a finding prints the moment something turns stuck (ctrl-c to stop)");

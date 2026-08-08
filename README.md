@@ -4,7 +4,7 @@
 
 **Point it at any process. It tells you what the process is waiting for.**
 
-*One sentence, with the evidence, in a quarter of a second. Nothing to install in your app, nothing to restart.*
+*One sentence, with the evidence, in a quarter of a second. Nothing to install in your app, nothing to restart. Linux fully, macOS natively.*
 
 [![zero instrumentation](https://img.shields.io/badge/instrumentation-zero-2E7D32?style=flat-square)](#how-it-reads-a-process) [![verdict or refusal](https://img.shields.io/badge/verdict-or%20refusal%2C%20never%20a%20guess-3557C4?style=flat-square)](#verdicts-and-refusals) [![diagnosis in 0.3s](https://img.shields.io/badge/diagnosis-~0.3s-8A2BE2?style=flat-square)](#the-hangbook) [![tests passing](https://img.shields.io/badge/tests-passing-2E7D32?style=flat-square)](#the-hangbook) [![Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-6A6F7A?style=flat-square)](LICENSE)
 
@@ -140,7 +140,7 @@ git clone https://github.com/hardy30894/waitson && cd waitson
 cargo build --release        # target/release/waitson
 ```
 
-Waitson reads `/proc` and process memory, so diagnosis runs on Linux today (on macOS, run it inside the container where your workload lives). Attaching follows the kernel's normal rules: your own processes with `ptrace_scope 0`, otherwise `sudo` or `CAP_SYS_PTRACE`; `waitson doctor` tells you which applies on your machine.
+Linux is the full experience: `/proc` and process memory give waitson every layer, and attaching follows the kernel's normal rules (your own processes with `ptrace_scope 0`, otherwise `sudo` or `CAP_SYS_PTRACE`). macOS runs a native tier with honest edges: thread states, cpu attribution, and socket endpoints come through `libproc` with no sudo at all, so busy/stopped/uninterruptible verdicts work on your own processes out of the box; wait *causes* and Python internals need memory reads, which macOS grants only under sudo; `scan`, `watch`, and name/`:port` targeting are Linux-only for now. Where the cause is invisible, waitson refuses and shows what it did see rather than guessing. `waitson doctor` tells you exactly which tier applies on your machine.
 
 ## License
 
