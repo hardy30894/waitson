@@ -12,5 +12,7 @@ path = "src/main.rs"
 waitson-schema.workspace = true
 waitson-snap.workspace = true
 waitson-read.workspace = true
+waitson-link.workspace = true
 waitson-judge.workspace = true
 serde_json.workspace = true
+libc.workspace = true

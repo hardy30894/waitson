@@ -1538,8 +1538,10 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "waitson"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "serde_json",
  "waitson-judge",
+ "waitson-link",
  "waitson-read",
  "waitson-schema",
  "waitson-snap",
@@ -1550,6 +1552,16 @@ name = "waitson-judge"
 version = "0.0.1"
 dependencies = [
  "waitson-schema",
+]
+
+[[package]]
+name = "waitson-link"
+version = "0.0.1"
+dependencies = [
+ "waitson-judge",
+ "waitson-read",
+ "waitson-schema",
+ "waitson-snap",
 ]
 
 [[package]]

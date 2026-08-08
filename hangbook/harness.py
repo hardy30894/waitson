@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Hangbook gate: ten canonical hangs, one verdict each.
+"""Hangbook: canonical hangs, one verdict each.
 
 Pass = expected verdict class, expected root-cause words, under 3 seconds.
-Ship gate >= 8/10, kill gate <= 5 (ideation/waitson-design.md v0.0).
+The v0.0 spike gate (>=8/10) is passed and this is now the regression
+suite: every scenario must pass.
 """
 import json
 import os
@@ -16,17 +17,21 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(ROOT, "..", "target", "release", "waitson")
 BUILD = "/tmp/hb"
 
+# (name, cmd, expected class, required substrings, target override)
+# A target of None diagnoses the pid the scenario prints; a string like
+# ":5432" exercises target resolution against the same live scenario.
 SCENARIOS = [
-    ("deadlock", [f"{BUILD}/deadlock"], "CAUSAL", [["deadlock"]]),
-    ("lockbusy", [f"{BUILD}/lockbusy"], "CAUSAL", [["held by"], ["busy", "running"]]),
-    ("slowdb", [sys.executable, "scenarios/slowdb.py"], "PARTIAL", [["5432", "postgres"]]),
-    ("dnsstall", [sys.executable, "scenarios/dnsstall.py"], "PARTIAL", [["dns", ":53"]]),
-    ("pipefull", [sys.executable, "scenarios/pipefull.py"], "CAUSAL", [["pipe"]]),
-    ("gil", [sys.executable, "scenarios/gil.py"], "CAUSAL", [["gil"]]),
-    ("dstate", [f"{BUILD}/dstate"], "CAUSAL", [["vfork"]]),
-    ("busyloop", [sys.executable, "scenarios/busyloop.py"], "OBSERVATION", [["busy"]]),
-    ("childwait", [sys.executable, "scenarios/childwait.py"], "CAUSAL", [["stopped"]]),
-    ("epollidle", [sys.executable, "scenarios/epollidle.py"], "OBSERVATION", [["idle"]]),
+    ("deadlock", [f"{BUILD}/deadlock"], "CAUSAL", [["deadlock"]], None),
+    ("lockbusy", [f"{BUILD}/lockbusy"], "CAUSAL", [["held by"], ["busy", "running"]], None),
+    ("slowdb", [sys.executable, "scenarios/slowdb.py"], "CAUSAL", [["5432", "postgres"], ["sleep"]], None),
+    ("dnsstall", [sys.executable, "scenarios/dnsstall.py"], "PARTIAL", [["dns", ":53"]], None),
+    ("pipefull", [sys.executable, "scenarios/pipefull.py"], "CAUSAL", [["pipe"]], None),
+    ("gil", [sys.executable, "scenarios/gil.py"], "CAUSAL", [["gil"]], None),
+    ("dstate", [f"{BUILD}/dstate"], "CAUSAL", [["vfork"]], None),
+    ("busyloop", [sys.executable, "scenarios/busyloop.py"], "OBSERVATION", [["busy"]], None),
+    ("childwait", [sys.executable, "scenarios/childwait.py"], "CAUSAL", [["stopped"]], None),
+    ("epollidle", [sys.executable, "scenarios/epollidle.py"], "OBSERVATION", [["idle"], ["asyncio"]], None),
+    ("porttarget", [sys.executable, "scenarios/slowdb.py"], "OBSERVATION", [["sleep"]], ":5432"),
 ]
 
 
@@ -53,7 +58,7 @@ def read_ready(proc, timeout=10.0):
     return result.get("pid")
 
 
-def run_one(name, cmd, expected, needles):
+def run_one(name, cmd, expected, needles, target_override):
     proc = subprocess.Popen(
         cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True
     )
@@ -63,6 +68,8 @@ def run_one(name, cmd, expected, needles):
         if target is None:
             row["error"] = "scenario never printed READY"
             return row
+        if target_override is not None:
+            target = target_override
         time.sleep(0.8)
 
         t0 = time.monotonic()
@@ -72,7 +79,7 @@ def run_one(name, cmd, expected, needles):
             row["error"] = out.stderr.strip()
             return row
 
-        verdict = json.loads(out.stdout)
+        verdict = json.loads(out.stdout)["verdict"]
         row["class"] = verdict["class"]
         row["headline"] = verdict["headline"]
         text = json.dumps(verdict).lower()
@@ -107,10 +114,11 @@ def main():
         detail = r.get("headline") or r.get("error", "")
         print(f"            {detail}")
 
-    print(f"\nhangbook: {passed}/10 (ship gate >= 8, kill gate <= 5)")
+    total = len(rows)
+    print(f"\nhangbook: {passed}/{total}")
     with open(os.path.join(ROOT, "results.json"), "w") as f:
-        json.dump({"passed": passed, "rows": rows}, f, indent=2)
-    sys.exit(0 if passed >= 8 else 1)
+        json.dump({"passed": passed, "total": total, "rows": rows}, f, indent=2)
+    sys.exit(0 if passed == total else 1)
 
 
 if __name__ == "__main__":

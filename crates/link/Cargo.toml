@@ -1,0 +1,11 @@
+[package]
+name = "waitson-link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+waitson-schema.workspace = true
+waitson-snap.workspace = true
+waitson-read.workspace = true
+waitson-judge.workspace = true

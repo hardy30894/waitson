@@ -221,15 +221,14 @@ mod linux {
         out
     }
 
-    fn collect_sockets() -> BTreeMap<u64, SocketConn> {
+    // Read the socket table through the target's own /proc entry: for a
+    // containerized pid that is its network namespace, not the host's.
+    fn collect_sockets(pid: i32) -> BTreeMap<u64, SocketConn> {
         let mut out = BTreeMap::new();
-        for (proto, path) in [
-            ("tcp", "/proc/net/tcp"),
-            ("tcp", "/proc/net/tcp6"),
-            ("udp", "/proc/net/udp"),
-            ("udp", "/proc/net/udp6"),
-        ] {
-            if let Some(body) = read(path.to_string()) {
+        for (proto, file) in [("tcp", "tcp"), ("tcp", "tcp6"), ("udp", "udp"), ("udp", "udp6")] {
+            let body = read(format!("/proc/{pid}/net/{file}"))
+                .or_else(|| read(format!("/proc/net/{file}")));
+            if let Some(body) = body {
                 parse_net(proto, &body, &mut out);
             }
         }
@@ -295,6 +294,29 @@ mod linux {
             }
         }
         out
+    }
+
+    pub fn socket_inode_owner(inode: u64, exclude: i32) -> Option<(i32, String)> {
+        let rd = fs::read_dir("/proc").ok()?;
+        for e in rd.flatten() {
+            let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else { continue };
+            if pid == exclude {
+                continue;
+            }
+            let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
+            for f in fds.flatten() {
+                let Ok(target) = fs::read_link(f.path()) else { continue };
+                if target.to_string_lossy() == format!("socket:[{inode}]") {
+                    let comm = read(format!("/proc/{pid}/stat"))
+                        .as_deref()
+                        .and_then(parse_stat)
+                        .map(|s| s.comm)
+                        .unwrap_or_default();
+                    return Some((pid, comm));
+                }
+            }
+        }
+        None
     }
 
     pub fn collect(pid: i32, window_ms: u64) -> io::Result<Snapshot> {
@@ -379,7 +401,7 @@ mod linux {
             window_ms: elapsed_ms,
             threads,
             fds,
-            sockets: collect_sockets(),
+            sockets: collect_sockets(pid),
             pipe_peers: collect_pipe_peers(&pipe_inodes, pid),
             children: collect_children(pid),
         })
@@ -387,14 +409,19 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::collect;
+pub use linux::{collect, socket_inode_owner};
 
 #[cfg(not(target_os = "linux"))]
 pub fn collect(_pid: i32, _window_ms: u64) -> io::Result<Snapshot> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "waitson v0.0 reads /proc; linux only (run the hangbook container)",
+        "waitson reads /proc; linux only for now (run inside a container on this machine)",
     ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn socket_inode_owner(_inode: u64, _exclude: i32) -> Option<(i32, String)> {
+    None
 }
 
 #[cfg(test)]

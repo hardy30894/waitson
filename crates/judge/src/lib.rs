@@ -20,7 +20,7 @@ fn classify(t: &ThreadSnap) -> Wait<'_> {
     if t.state == TaskState::DiskSleep {
         // The vfork completion wait shows wchan vfork_done on older kernels and
         // kernel_clone on newer ones (the wait was inlined); a persistent D sleep
-        // there is the vfork wait — nothing else sleeps long inside clone.
+        // there is the vfork wait, nothing else sleeps long inside clone.
         return if t.wchan.contains("vfork") || t.wchan.contains("kernel_clone") {
             Wait::Vfork
         } else {
@@ -97,7 +97,27 @@ fn verdict(class: VerdictClass, headline: String, chain: Vec<String>, evidence: 
     Verdict { class, headline, chain, evidence }
 }
 
-pub fn judge(s: &Snapshot, py: Option<&PySnapshot>) -> Verdict {
+fn decapitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_lowercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Which socket inode the subject is actually blocked on, if any.
+/// LINK uses this to hop only where the evidence points.
+pub fn blocking_socket_inode(s: &Snapshot) -> Option<u64> {
+    let subject = s.main_thread()?;
+    if let Wait::OnFd { fd, .. } = classify(subject) {
+        if let Some(FdKind::Socket { inode }) = s.fd(fd).map(|e| &e.kind) {
+            return Some(*inode);
+        }
+    }
+    None
+}
+
+pub fn judge(s: &Snapshot, links: &Links, py: Option<&PySnapshot>) -> Verdict {
     let Some(subject) = s.main_thread() else {
         return verdict(
             VerdictClass::Refusal,
@@ -110,23 +130,20 @@ pub fn judge(s: &Snapshot, py: Option<&PySnapshot>) -> Verdict {
         Wait::Futex { owner: Some(owner) } => futex_owned(s, py, subject, owner),
         Wait::Futex { owner: None } => futex_anonymous(s, py, subject),
         Wait::OnFd { call: "write", fd } => blocked_write(s, subject, fd),
-        Wait::OnFd { call, fd } => blocked_read(s, subject, call, fd),
+        Wait::OnFd { call, fd } => blocked_read(s, links, subject, call, fd),
         Wait::Child => waiting_on_child(s, subject),
         Wait::Vfork => vfork_wait(s, subject),
         Wait::Disk(wchan) => verdict(
             VerdictClass::Partial,
-            format!(
-                "pid {} ({}) is in uninterruptible kernel sleep in {} — trail ends in the kernel",
-                s.pid, s.comm, wchan
-            ),
+            format!("in uninterruptible kernel sleep in {wchan} — trail ends in the kernel"),
             vec![format!("thread {} state D, wchan {}", subject.tid, wchan)],
             vec!["uninterruptible sleep is kernel- or IO-bound; not killable until it returns".into()],
         ),
         Wait::Run => running(s, py, subject),
-        Wait::Poll => polling(s, subject),
+        Wait::Poll => polling(s, py, subject),
         Wait::Sleep => verdict(
             VerdictClass::Observation,
-            format!("pid {} ({}) is not stuck — it is deliberately sleeping (nanosleep)", s.pid, s.comm),
+            "not stuck — deliberately sleeping (nanosleep)".to_string(),
             vec![format!("thread {} blocked in a timed sleep", subject.tid)],
             vec![],
         ),
@@ -209,10 +226,7 @@ fn futex_anonymous(s: &Snapshot, py: Option<&PySnapshot>, subject: &ThreadSnap) 
     }
     verdict(
         VerdictClass::Partial,
-        format!(
-            "pid {} ({}) is blocked on a futex (a lock or condition variable); the holder is not identifiable — trail ends at the futex word",
-            s.pid, s.comm
-        ),
+        "blocked on a futex (a lock or condition variable); the holder is not identifiable — trail ends at the futex word".to_string(),
         vec![format!("thread {} in futex wait, no owner field readable", subject.tid)],
         vec![],
     )
@@ -230,7 +244,7 @@ fn describe_fd_wait(s: &Snapshot, call: &str, fd: i32) -> String {
     }
 }
 
-fn blocked_read(s: &Snapshot, subject: &ThreadSnap, call: &str, fd: i32) -> Verdict {
+fn blocked_read(s: &Snapshot, links: &Links, subject: &ThreadSnap, call: &str, fd: i32) -> Verdict {
     match s.fd(fd).map(|e| &e.kind) {
         Some(FdKind::Socket { inode }) => {
             let Some(conn) = s.sockets.get(inode) else {
@@ -241,11 +255,31 @@ fn blocked_read(s: &Snapshot, subject: &ThreadSnap, call: &str, fd: i32) -> Verd
                     vec![],
                 );
             };
+            let label = service_label(&conn.remote).map(|l| format!(" ({l})")).unwrap_or_default();
+            if let Some(peer) = links.socket_peers.get(inode) {
+                let peer_doing = decapitalize(peer.headline.strip_prefix("not stuck — ").unwrap_or(&peer.headline));
+                return verdict(
+                    VerdictClass::Causal,
+                    format!(
+                        "waiting on a reply from {}{}, which is pid {} ({}) on this machine — {}",
+                        conn.remote, label, peer.pid, peer.comm, peer_doing
+                    ),
+                    vec![
+                        format!("thread {} blocked in {} on fd {}", subject.tid, call, fd),
+                        format!("fd {} is a {} socket {} → {}", fd, conn.proto, conn.local, conn.remote),
+                        format!("the other end resolved to pid {} ({}) and was diagnosed one hop deep", peer.pid, peer.comm),
+                        format!("pid {}: {}", peer.pid, peer.headline),
+                    ],
+                    vec![format!(
+                        "socket state {}, rx_queue {}, tx_queue {}",
+                        conn.state, conn.rx_queue, conn.tx_queue
+                    )],
+                );
+            }
             let is_dns = conn.proto == "udp" && service_label(&conn.remote) == Some("dns");
             let headline = if is_dns {
                 format!("waiting on a DNS response from {} that has not arrived — trail ends at the wire", conn.remote)
             } else {
-                let label = service_label(&conn.remote).map(|l| format!(" ({l})")).unwrap_or_default();
                 format!("waiting on a reply from {}{} — nothing to read yet, trail ends at the wire", conn.remote, label)
             };
             verdict(
@@ -423,7 +457,18 @@ fn running(s: &Snapshot, py: Option<&PySnapshot>, subject: &ThreadSnap) -> Verdi
     )
 }
 
-fn polling(s: &Snapshot, subject: &ThreadSnap) -> Verdict {
+fn is_asyncio(py: Option<&PySnapshot>, os_tid: i32) -> bool {
+    py.map(|p| {
+        p.threads
+            .iter()
+            .filter(|t| t.os_tid == Some(os_tid as u64) || p.threads.len() == 1)
+            .flat_map(|t| &t.frames)
+            .any(|f| f.filename.contains("asyncio"))
+    })
+    .unwrap_or(false)
+}
+
+fn polling(s: &Snapshot, py: Option<&PySnapshot>, subject: &ThreadSnap) -> Verdict {
     let total: u64 = s.threads.iter().map(|t| t.cpu_delta).sum();
     let registered: usize = s
         .fds
@@ -442,15 +487,26 @@ fn polling(s: &Snapshot, subject: &ThreadSnap) -> Verdict {
         })
         .sum();
     if total == 0 && pending == 0 {
+        let (what, hint) = if is_asyncio(py, subject.tid) {
+            (
+                "asyncio event loop is idle",
+                "no runnable tasks; every task is awaiting the outside world, or an await nobody completes",
+            )
+        } else {
+            (
+                "idle by design: parked on the event loop with nothing ready",
+                "no armed work is visible; it is waiting for the outside world",
+            )
+        };
         return verdict(
             VerdictClass::Observation,
             format!(
-                "idle by design: parked on the event loop with nothing ready — {} fds registered, none with pending data, zero cpu",
-                registered
+                "{} — {} fds registered, none with pending data, zero cpu",
+                what, registered
             ),
             vec![
                 format!("thread {} blocked in the poller with no timeout pressure", subject.tid),
-                "no armed work is visible; it is waiting for the outside world".into(),
+                hint.into(),
             ],
             vec![format!("cpu over the window: 0 ticks; pending socket bytes: 0")],
         );
@@ -463,6 +519,26 @@ fn polling(s: &Snapshot, subject: &ThreadSnap) -> Verdict {
     )
 }
 
+/// Go parks every blocked goroutine behind the netpoller, so kernel-level
+/// facts cannot distinguish a stuck Go program from an idle one. Until the
+/// goroutine reader lands, a verdict here would be a guess.
+pub fn go_refusal(s: &Snapshot) -> Verdict {
+    let seen: Vec<String> = s
+        .threads
+        .iter()
+        .map(|t| format!("tid {} {:?} wchan={}", t.tid, t.state, t.wchan))
+        .collect();
+    verdict(
+        VerdictClass::Refusal,
+        "a Go runtime: goroutine stacks are the only truthful layer for Go, and the goroutine reader is not built yet — refusing rather than guessing from the kernel view".into(),
+        vec![
+            "Go multiplexes goroutines over threads; a blocked program and an idle one look identical from outside".into(),
+            "the kernel-level facts gathered anyway are in the evidence".into(),
+        ],
+        seen,
+    )
+}
+
 fn refusal(s: &Snapshot, subject: &ThreadSnap) -> Verdict {
     let seen: Vec<String> = s
         .threads
@@ -471,10 +547,7 @@ fn refusal(s: &Snapshot, subject: &ThreadSnap) -> Verdict {
         .collect();
     verdict(
         VerdictClass::Refusal,
-        format!(
-            "no verdict for pid {} ({}): the wait does not match a known shape — here is everything seen",
-            s.pid, s.comm
-        ),
+        "no verdict: the wait does not match a known shape — here is everything seen".to_string(),
         vec![format!("main thread {} wchan={}", subject.tid, subject.wchan)],
         seen,
     )
@@ -518,7 +591,7 @@ mod tests {
             thread(1, TaskState::Sleeping, "futex_wait", Some(("futex", [0; 6])), Some(2)),
             thread(2, TaskState::Sleeping, "futex_wait", Some(("futex", [0; 6])), Some(1)),
         ]);
-        let v = judge(&s, None);
+        let v = judge(&s, &Links::default(), None);
         assert_eq!(v.class, VerdictClass::Causal);
         assert!(v.headline.contains("deadlock"));
     }
@@ -529,7 +602,7 @@ mod tests {
             thread(1, TaskState::Sleeping, "futex_wait", Some(("futex", [0; 6])), Some(2)),
             thread(2, TaskState::Running, "", None, None),
         ]);
-        let v = judge(&s, None);
+        let v = judge(&s, &Links::default(), None);
         assert_eq!(v.class, VerdictClass::Causal);
         assert!(v.headline.contains("held by thread 2"));
         assert!(v.headline.contains("busy"));
@@ -552,7 +625,7 @@ mod tests {
                 },
             ],
         };
-        let v = judge(&s, Some(&py));
+        let v = judge(&s, &Links::default(), Some(&py));
         assert_eq!(v.class, VerdictClass::Causal);
         assert!(v.headline.contains("GIL"));
         assert!(v.headline.contains("hog"));
@@ -575,7 +648,7 @@ mod tests {
             wchan: "hrtimer_nanosleep".into(),
             reads: true,
         }]);
-        let v = judge(&s, None);
+        let v = judge(&s, &Links::default(), None);
         assert_eq!(v.class, VerdictClass::Causal);
         assert!(v.headline.contains("pipe full"));
         assert!(v.headline.contains("500"));
@@ -599,17 +672,61 @@ mod tests {
             tx_queue: 0,
             rx_queue: 0,
         });
-        let v = judge(&s, None);
+        let v = judge(&s, &Links::default(), None);
         assert_eq!(v.class, VerdictClass::Partial);
         assert!(v.headline.contains("5432"));
         assert!(v.headline.contains("postgres"));
     }
 
     #[test]
+    fn resolved_local_peer_upgrades_socket_wait_to_causal() {
+        let mut s = snap(1, vec![thread(
+            1,
+            TaskState::Sleeping,
+            "sk_wait_data",
+            Some(("recvfrom", [3, 0, 0, 0, 0, 0])),
+            None,
+        )]);
+        s.fds = vec![FdEntry { fd: 3, kind: FdKind::Socket { inode: 42 }, flags: 2 }];
+        s.sockets.insert(42, SocketConn {
+            proto: "tcp".into(),
+            local: "127.0.0.1:50000".into(),
+            remote: "127.0.0.1:9000".into(),
+            state: "ESTABLISHED".into(),
+            tx_queue: 0,
+            rx_queue: 0,
+        });
+        let mut links = Links::default();
+        links.socket_peers.insert(42, SocketPeerDiag {
+            pid: 777,
+            comm: "python3".into(),
+            class: VerdictClass::Observation,
+            headline: "Not stuck — it is deliberately sleeping (nanosleep)".into(),
+        });
+        let v = judge(&s, &links, None);
+        assert_eq!(v.class, VerdictClass::Causal);
+        assert!(v.headline.contains("777"));
+        assert!(v.headline.contains("sleeping"));
+    }
+
+    #[test]
+    fn blocking_socket_inode_points_at_the_evidence() {
+        let mut s = snap(1, vec![thread(
+            1,
+            TaskState::Sleeping,
+            "sk_wait_data",
+            Some(("recvfrom", [3, 0, 0, 0, 0, 0])),
+            None,
+        )]);
+        s.fds = vec![FdEntry { fd: 3, kind: FdKind::Socket { inode: 42 }, flags: 2 }];
+        assert_eq!(blocking_socket_inode(&s), Some(42));
+    }
+
+    #[test]
     fn stopped_child_is_the_cause() {
         let mut s = snap(1, vec![thread(1, TaskState::Sleeping, "do_wait", Some(("wait4", [0; 6])), None)]);
         s.children = vec![ChildSnap { pid: 9, comm: "kid".into(), state: TaskState::Stopped }];
-        let v = judge(&s, None);
+        let v = judge(&s, &Links::default(), None);
         assert_eq!(v.class, VerdictClass::Causal);
         assert!(v.headline.to_lowercase().contains("stopped"));
     }
@@ -619,7 +736,7 @@ mod tests {
         for wchan in ["vfork_done", "kernel_clone"] {
             let mut s = snap(1, vec![thread(1, TaskState::DiskSleep, wchan, None, None)]);
             s.children = vec![ChildSnap { pid: 9, comm: "kid".into(), state: TaskState::Sleeping }];
-            let v = judge(&s, None);
+            let v = judge(&s, &Links::default(), None);
             assert_eq!(v.class, VerdictClass::Causal, "wchan {wchan}");
             assert!(v.headline.contains("vfork"));
         }
@@ -628,7 +745,7 @@ mod tests {
     #[test]
     fn unknown_shape_refuses_with_evidence() {
         let s = snap(1, vec![thread(1, TaskState::Sleeping, "mystery_wait", None, None)]);
-        let v = judge(&s, None);
+        let v = judge(&s, &Links::default(), None);
         assert_eq!(v.class, VerdictClass::Refusal);
         assert!(!v.evidence.is_empty());
     }

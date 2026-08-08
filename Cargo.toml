@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/schema", "crates/snap", "crates/read", "crates/judge", "crates/cli"]
+members = ["crates/schema", "crates/snap", "crates/read", "crates/link", "crates/judge", "crates/cli"]
 
 [workspace.package]
 version = "0.0.1"
@@ -15,6 +15,7 @@ py-spy = "0.4"
 waitson-schema = { path = "crates/schema" }
 waitson-snap = { path = "crates/snap" }
 waitson-read = { path = "crates/read" }
+waitson-link = { path = "crates/link" }
 waitson-judge = { path = "crates/judge" }
 
 [profile.release]

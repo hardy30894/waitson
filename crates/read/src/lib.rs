@@ -35,3 +35,15 @@ fn looks_python(pid: i32) -> bool {
         .map(|f| f.contains("python"))
         .unwrap_or(false)
 }
+
+/// Every Go binary embeds a "Go buildinf:" block near the front of the
+/// image; 4MB covers it in practice without reading a whole large binary.
+pub fn looks_go(pid: i32) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(format!("/proc/{pid}/exe")) else {
+        return false;
+    };
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    let Ok(n) = f.read(&mut buf) else { return false };
+    buf[..n].windows(12).any(|w| w == b"Go buildinf:")
+}

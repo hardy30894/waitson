@@ -151,6 +151,52 @@ pub enum VerdictClass {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketPeerDiag {
+    pub pid: i32,
+    pub comm: String,
+    pub class: VerdictClass,
+    pub headline: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Links {
+    pub socket_peers: BTreeMap<u64, SocketPeerDiag>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+    pub why: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WaitGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+impl WaitGraph {
+    pub fn node(&mut self, id: impl Into<String>, label: impl Into<String>) -> String {
+        let id = id.into();
+        if !self.nodes.iter().any(|n| n.id == id) {
+            self.nodes.push(GraphNode { id: id.clone(), label: label.into() });
+        }
+        id
+    }
+
+    pub fn edge(&mut self, from: impl Into<String>, to: impl Into<String>, why: impl Into<String>) {
+        self.edges.push(GraphEdge { from: from.into(), to: to.into(), why: why.into() });
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Verdict {
     pub class: VerdictClass,
     pub headline: String,
