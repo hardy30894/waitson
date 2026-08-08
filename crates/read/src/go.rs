@@ -15,6 +15,10 @@ struct GOffsets {
     waitreason: u64,
     startpc: u64,
     gopc: u64,
+    sched: u64,
+    gobuf_sp: u64,
+    gobuf_pc: u64,
+    gobuf_lr: u64,
 }
 
 pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
@@ -103,6 +107,20 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
             .as_ref()
             .and_then(|t| t.resolve(gopc.wrapping_sub(1)))
             .map(|(name, file, line)| format!("{name} ({}:{line})", short_path(&file)));
+        // sched is only trustworthy for parked goroutines; a running one
+        // left stale values behind.
+        let stack = if status == 4 {
+            (|| -> Option<Vec<String>> {
+                let sched = g + off.sched;
+                let sp = u64le(&mem(pid, sched + off.gobuf_sp, 8).ok()?);
+                let pc = u64le(&mem(pid, sched + off.gobuf_pc, 8).ok()?);
+                let lr = u64le(&mem(pid, sched + off.gobuf_lr, 8).ok()?);
+                Some(unwind(pid, pcln.as_ref()?, bias, pc, sp, lr))
+            })()
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         goroutines.push(GoRoutine {
             goid: u64le(&goid_b),
             status: status_name.to_string(),
@@ -110,6 +128,7 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
             func: func_name(&funcs, startpc),
             source,
             spawned_from,
+            stack,
         });
     }
     if goroutines.is_empty() {
@@ -142,6 +161,42 @@ fn load_bias(pid: i32, file: &object::File) -> Result<u64, String> {
         .min()
         .ok_or("no load segments")?;
     Ok(base.wrapping_sub(min_vaddr))
+}
+
+// The runtime's own unwind rules, replayed from outside: the pcsp table
+// gives each frame's size; on arm64 the saved return address sits at the
+// frame's lowest word (LR still in gobuf for size-zero leaves), on x86_64
+// it sits above the frame where CALL pushed it. runtime.goexit is the
+// bottom of every goroutine stack.
+fn unwind(pid: i32, pcln: &crate::pclntab::Pclntab, bias: u64, mut pc: u64, mut sp: u64, lr: u64) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 0..32 {
+        let lookup = pc.wrapping_sub(bias).wrapping_sub(if i == 0 { 0 } else { 1 });
+        let Some((name, file, line)) = pcln.resolve(lookup) else { break };
+        if name == "runtime.goexit" || name.is_empty() {
+            break;
+        }
+        out.push(format!("{name} ({}:{line})", short_path(&file)));
+        let Some(delta) = pcln.sp_delta(lookup) else { break };
+        let delta = delta.max(0) as u64;
+        let (ret, next_sp) = if cfg!(target_arch = "aarch64") {
+            if delta == 0 {
+                if i == 0 && lr != 0 { (lr, sp) } else { break }
+            } else {
+                let Some(b) = waitson_snap::read_mem(pid, sp, 8) else { break };
+                (u64le(&b), sp + delta)
+            }
+        } else {
+            let Some(b) = waitson_snap::read_mem(pid, sp + delta, 8) else { break };
+            (u64le(&b), sp + delta + 8)
+        };
+        if ret == 0 || next_sp < sp {
+            break;
+        }
+        pc = ret;
+        sp = next_sp;
+    }
+    out
 }
 
 fn short_path(path: &str) -> String {
@@ -211,41 +266,54 @@ fn g_offsets(file: &object::File) -> Result<GOffsets, String> {
         let unit = dwarf.unit(header).map_err(|e| e.to_string())?;
         let mut entries = unit.entries();
         let mut depth = 0isize;
-        let mut struct_depth: Option<isize> = None;
+        let mut in_struct: Option<(&str, isize)> = None;
         let mut members: HashMap<String, u64> = HashMap::new();
+        let mut gobuf: HashMap<String, u64> = HashMap::new();
         while let Some((delta, entry)) = entries.next_dfs().map_err(|e| e.to_string())? {
             depth += delta;
-            if let Some(sd) = struct_depth {
+            if let Some((which, sd)) = in_struct {
                 if depth <= sd {
-                    break;
-                }
-                if depth == sd + 1 && entry.tag() == gimli::DW_TAG_member {
-                    let name = attr_name(&dwarf, &unit, entry);
-                    let loc = entry
-                        .attr_value(gimli::DW_AT_data_member_location)
-                        .ok()
-                        .flatten()
-                        .and_then(|v| v.udata_value());
-                    if let (Some(name), Some(loc)) = (name, loc) {
-                        members.insert(name, loc);
+                    in_struct = None;
+                } else {
+                    if depth == sd + 1 && entry.tag() == gimli::DW_TAG_member {
+                        let name = attr_name(&dwarf, &unit, entry);
+                        let loc = entry
+                            .attr_value(gimli::DW_AT_data_member_location)
+                            .ok()
+                            .flatten()
+                            .and_then(|v| v.udata_value());
+                        if let (Some(name), Some(loc)) = (name, loc) {
+                            if which == "g" {
+                                members.insert(name, loc);
+                            } else {
+                                gobuf.insert(name, loc);
+                            }
+                        }
                     }
+                    continue;
                 }
-                continue;
             }
-            if entry.tag() == gimli::DW_TAG_structure_type
-                && attr_name(&dwarf, &unit, entry).as_deref() == Some("runtime.g")
-            {
-                struct_depth = Some(depth);
+            if entry.tag() == gimli::DW_TAG_structure_type {
+                match attr_name(&dwarf, &unit, entry).as_deref() {
+                    Some("runtime.g") => in_struct = Some(("g", depth)),
+                    Some("runtime.gobuf") => in_struct = Some(("gobuf", depth)),
+                    _ => {}
+                }
             }
         }
-        if !members.is_empty() {
+        if !members.is_empty() && !gobuf.is_empty() {
             let get = |k: &str| members.get(k).copied().ok_or_else(|| format!("runtime.g has no member {k}"));
+            let getb = |k: &str| gobuf.get(k).copied().ok_or_else(|| format!("runtime.gobuf has no member {k}"));
             return Ok(GOffsets {
                 goid: get("goid")?,
                 atomicstatus: get("atomicstatus")?,
                 waitreason: get("waitreason")?,
                 startpc: get("startpc")?,
                 gopc: get("gopc")?,
+                sched: get("sched")?,
+                gobuf_sp: getb("sp")?,
+                gobuf_pc: getb("pc")?,
+                gobuf_lr: getb("lr")?,
             });
         }
     }

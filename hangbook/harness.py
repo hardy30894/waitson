@@ -53,6 +53,10 @@ def build_c():
     subprocess.run(
         ["go", "build", "-ldflags", "-s -w", "-o", f"{BUILD}/gostripped", src], env=goenv, check=True
     )
+    subprocess.run(
+        ["go", "build", "-o", f"{BUILD}/gostacks", os.path.join(ROOT, "scenarios", "gostacks.go")],
+        env=goenv, check=True,
+    )
     subprocess.run(["javac", "-d", BUILD, os.path.join(ROOT, "scenarios", "Deadlock.java")], check=True)
 
 
@@ -214,6 +218,48 @@ def run_watch_row():
                 p.wait()
 
 
+def run_gounwind_row():
+    """Waitson's goroutine unwind, held against runtime.Stack ground truth:
+    the a->b->c chain must appear in the verdict in the same order the
+    runtime itself reports."""
+    row = {"name": "gounwind", "expected": "GROUNDTRUTH", "passed": False}
+    proc = subprocess.Popen(
+        [f"{BUILD}/gostacks"], cwd=ROOT,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+    )
+    try:
+        target = read_ready(proc)
+        if target is None:
+            row["error"] = "scenario never printed READY"
+            return row
+        time.sleep(0.8)
+        t0 = time.monotonic()
+        out = subprocess.run([BIN, str(target), "--json"], capture_output=True, text=True, timeout=10)
+        row["seconds"] = round(time.monotonic() - t0, 2)
+        verdict = json.loads(out.stdout)["verdict"]
+        text = json.dumps(verdict)
+        row["class"] = verdict["class"]
+
+        truth = open(f"{BUILD}/gostacks.txt").read()
+        truth_ok = truth.index("main.c") < truth.index("main.b") < truth.index("main.a")
+        ours_ok = (
+            "main.c" in text and text.index("main.c") < text.index("main.b") < text.index("main.a")
+        )
+        chain_line = next((l for l in verdict["chain"] if "main.c" in l), "")
+        row["headline"] = chain_line or verdict["headline"]
+        row["passed"] = truth_ok and ours_ok and verdict["class"] == "PARTIAL"
+        return row
+    except Exception as e:
+        row["error"] = repr(e)
+        return row
+    finally:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+
+
 def run_pipes_row():
     """The blocks compose like pipes: snap | judge must reach the same
     verdict class offline, with the documented exit code."""
@@ -325,6 +371,7 @@ def main():
     rows.append(run_watch_row())
     rows.append(run_pipes_row())
     rows.append(run_overhead_row())
+    rows.append(run_gounwind_row())
     passed = sum(r["passed"] for r in rows)
 
     print(f"\n{'scenario':<11} {'verdict':<12} {'want':<12} {'time':>5}  result")

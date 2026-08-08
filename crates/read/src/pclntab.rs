@@ -37,9 +37,7 @@ impl<'a> Pclntab<'a> {
         })
     }
 
-    /// pc (link-time address) -> (function, file, line).
-    pub fn resolve(&self, pc: u64) -> Option<(String, String, u32)> {
-        let rel = pc.checked_sub(self.text_start)?;
+    fn func_at(&self, rel: u64) -> Option<(u64, usize)> {
         let entry = |i: u64| -> Option<u32> {
             let off = (self.pcln_off + i * 8) as usize;
             Some(u32::from_le_bytes(self.data.get(off..off + 4)?.try_into().ok()?))
@@ -58,11 +56,28 @@ impl<'a> Pclntab<'a> {
         let funcoff_off = (self.pcln_off + idx * 8 + 4) as usize;
         let funcoff =
             u32::from_le_bytes(self.data.get(funcoff_off..funcoff_off + 4)?.try_into().ok()?) as u64;
-        let fi = (self.pcln_off + funcoff) as usize;
-        let field = |n: usize| -> Option<u32> {
-            let off = fi + n * 4;
-            Some(u32::from_le_bytes(self.data.get(off..off + 4)?.try_into().ok()?))
-        };
+        Some((func_entry, (self.pcln_off + funcoff) as usize))
+    }
+
+    fn field(&self, fi: usize, n: usize) -> Option<u32> {
+        let off = fi + n * 4;
+        Some(u32::from_le_bytes(self.data.get(off..off + 4)?.try_into().ok()?))
+    }
+
+    /// The frame size (sp delta) a function has grown at a given pc, from
+    /// the pcsp table: what the runtime's own unwinder consults.
+    pub fn sp_delta(&self, pc: u64) -> Option<i64> {
+        let rel = pc.checked_sub(self.text_start)?;
+        let (func_entry, fi) = self.func_at(rel)?;
+        let pcsp = self.field(fi, 4)?;
+        self.pcvalue(pcsp as u64, func_entry, rel)
+    }
+
+    /// pc (link-time address) -> (function, file, line).
+    pub fn resolve(&self, pc: u64) -> Option<(String, String, u32)> {
+        let rel = pc.checked_sub(self.text_start)?;
+        let (func_entry, fi) = self.func_at(rel)?;
+        let field = |n: usize| self.field(fi, n);
         let nameoff = field(1)?;
         let pcfile = field(5)?;
         let pcln = field(6)?;

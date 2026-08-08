@@ -696,7 +696,7 @@ pub fn go_refusal(s: &Snapshot, reason: &str) -> Verdict {
 pub fn judge_go(_s: &Snapshot, go: &GoSnapshot) -> Verdict {
     let internal = |r: &str| {
         r.starts_with("chan ")
-            || r == "select"
+            || r.starts_with("select")
             || r.starts_with("sync.")
             || r.starts_with("semacquire")
             || r.starts_with("wait for GC")
@@ -715,23 +715,32 @@ pub fn judge_go(_s: &Snapshot, go: &GoSnapshot) -> Verdict {
         .collect();
     let waiting: Vec<&&GoRoutine> = user.iter().filter(|g| g.status == "waiting").collect();
 
-    type Group<'a> = (usize, Option<&'a str>, Option<&'a str>);
+    type Group<'a> = (usize, Option<&'a str>, Option<&'a str>, &'a [String]);
     let mut groups: std::collections::BTreeMap<(&str, &str), Group> = Default::default();
     for g in &waiting {
         let e = groups
             .entry((g.wait_reason.as_str(), g.func.as_str()))
-            .or_insert((0, g.source.as_deref(), g.spawned_from.as_deref()));
+            .or_insert((0, g.source.as_deref(), g.spawned_from.as_deref(), g.stack.as_slice()));
         e.0 += 1;
     }
     let mut summary: Vec<String> = groups
         .iter()
-        .map(|((reason, func), (n, source, spawned))| {
+        .map(|((reason, func), (n, source, spawned, stack))| {
             let mut line = format!("{n}× {reason} in {func}");
             if let Some(src) = source {
                 line += &format!(" ({src})");
             }
             if let Some(sp) = spawned.filter(|sp| !sp.starts_with("runtime.")) {
                 line += &format!(", spawned from {sp}");
+            }
+            let user: Vec<&str> = stack
+                .iter()
+                .filter(|f| !f.starts_with("runtime."))
+                .map(String::as_str)
+                .take(6)
+                .collect();
+            if !user.is_empty() {
+                line += &format!(" — blocked at {}", user.join(" ← "));
             }
             line
         })
@@ -1036,6 +1045,7 @@ mod tests {
             func: func.into(),
             source: None,
             spawned_from: None,
+            stack: vec![],
         }
     }
 

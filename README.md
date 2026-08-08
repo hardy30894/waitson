@@ -48,10 +48,11 @@ $ waitson 41610
 waitson: pid 41610 (api) — waiting at the Go level: the main goroutine is blocked in chan receive —
                            4 goroutines blocked, and only an external event can move it (still open: IO wait (main.listen))
   → 3× chan send in main.worker (api/worker.go:26), spawned from main.main (api/main.go:31)
+       — blocked at main.send (api/worker.go:83) ← main.process (api/worker.go:41) ← main.worker (api/worker.go:26)
   → 1× IO wait in main.listen (api/server.go:88)
 ```
 
-Which line is stuck and which line started it, resolved from the binary's own gopclntab — the same tables the Go runtime uses to print its own panics.
+Which line is stuck, the call chain that got there, and the `go` statement that started it — resolved from the binary's own gopclntab and unwound with the runtime's own pcsp tables. The unwinder is held against `runtime.Stack` ground truth in the test suite: waitson's frames must match the runtime's own report of the same process, frame for frame, or the suite fails.
 
 And when nothing is wrong, it says so, which is also an answer:
 
@@ -132,6 +133,7 @@ The test suite is a set of reproducible stuck programs, each with the verdict it
 | hang introduced under `watch` | flagged at onset, unprompted, in under a second | 0.98s |
 | `snap \| judge` pipeline | same verdict class offline, exit code honored | 0.27s |
 | do-no-harm under 4 diagnoses | target throughput within 3 sigma of its own baseline | measured |
+| goroutine stack unwind | frames match `runtime.Stack` ground truth, in order | 0.30s |
 
 Reproduce it: `./hangbook/run.sh` builds everything and scores the matrix in a container. Scenarios that expose a wrong or missing verdict are the contribution we want most.
 

@@ -158,6 +158,7 @@ pub struct GoRoutine {
     pub func: String,
     pub source: Option<String>,
     pub spawned_from: Option<String>,
+    pub stack: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
