@@ -4,10 +4,28 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-struct Sample {
+pub(crate) struct Sample {
     state: char,
     ticks: u64,
     comm: String,
+}
+
+// Stuck in anger means: uninterruptible the whole window, or a core burned
+// across it (>=30 of the ~40 ticks a 400ms window holds, i.e. 75%).
+pub(crate) fn suspects(
+    first: &BTreeMap<i32, Sample>,
+    second: &BTreeMap<i32, Sample>,
+) -> Vec<(i32, String, String)> {
+    let mut out = Vec::new();
+    for (pid, b) in second {
+        let Some(a) = first.get(pid) else { continue };
+        if a.state == 'D' && b.state == 'D' {
+            out.push((*pid, b.comm.clone(), "uninterruptible sleep across the window".into()));
+        } else if a.state == 'R' && b.state == 'R' && b.ticks.saturating_sub(a.ticks) >= 30 {
+            out.push((*pid, b.comm.clone(), "a full core burned across the window".into()));
+        }
+    }
+    out
 }
 
 pub fn scan(json: bool) {
@@ -15,16 +33,7 @@ pub fn scan(json: bool) {
     let first = sweep(me);
     std::thread::sleep(std::time::Duration::from_millis(400));
     let second = sweep(me);
-
-    let mut suspects: Vec<(i32, String, String)> = Vec::new();
-    for (pid, b) in &second {
-        let Some(a) = first.get(pid) else { continue };
-        if a.state == 'D' && b.state == 'D' {
-            suspects.push((*pid, b.comm.clone(), "uninterruptible sleep across the window".into()));
-        } else if a.state == 'R' && b.state == 'R' && b.ticks.saturating_sub(a.ticks) >= 30 {
-            suspects.push((*pid, b.comm.clone(), "a full core burned across the window".into()));
-        }
-    }
+    let mut suspects = suspects(&first, &second);
     suspects.truncate(6);
 
     let mut findings = Vec::new();
@@ -64,7 +73,7 @@ pub fn scan(json: bool) {
     }
 }
 
-fn sweep(me: i32) -> BTreeMap<i32, Sample> {
+pub(crate) fn sweep(me: i32) -> BTreeMap<i32, Sample> {
     let mut out = BTreeMap::new();
     let Ok(rd) = fs::read_dir("/proc") else { return out };
     for e in rd.flatten() {

@@ -2,9 +2,11 @@ use std::process::exit;
 use waitson_schema::Verdict;
 
 mod scan;
+mod watch;
 
 const USAGE: &str = "usage: waitson <pid | name | :port> [--json] [--window-ms N]
        waitson scan [--json]
+       waitson watch [--json]
        waitson doctor";
 
 fn main() {
@@ -29,6 +31,11 @@ fn main() {
             "scan" => {
                 let json = args.any(|a| a == "--json");
                 scan::scan(json);
+                return;
+            }
+            "watch" => {
+                let json = args.any(|a| a == "--json");
+                watch::watch(json);
                 return;
             }
             _ => target = Some(a),

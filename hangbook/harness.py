@@ -34,6 +34,7 @@ SCENARIOS = [
     ("porttarget", [sys.executable, "scenarios/slowdb.py"], "OBSERVATION", [["sleep"]], ":5432"),
     ("gochan", [f"{BUILD}/gochan"], "PARTIAL", [["goroutine"], ["chan receive"]], None),
     ("gostripped", [f"{BUILD}/gostripped"], "REFUSAL", [["stripped"]], None),
+    ("threadstuck", [sys.executable, "scenarios/threadstuck.py"], "CAUSAL", [["9009"], ["sleep"], ["most-blocked"]], None),
 ]
 
 
@@ -151,10 +152,64 @@ def run_scan_row():
             p.wait()
 
 
+def run_watch_row():
+    """Start the sentinel on a quiet machine, then introduce a busy loop;
+    watch must emit a finding for it at onset, unprompted."""
+    row = {"name": "watch", "expected": "ONSET", "passed": False}
+    watcher = subprocess.Popen(
+        [BIN, "watch", "--json"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True
+    )
+    hog = None
+    try:
+        time.sleep(1.2)
+        hog = subprocess.Popen(
+            [sys.executable, "scenarios/busyloop.py"], cwd=ROOT,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+        )
+        hog_pid = read_ready(hog)
+        t0 = time.monotonic()
+        events = {}
+
+        def reader():
+            for line in watcher.stdout:
+                try:
+                    ev = json.loads(line)
+                    events[ev["pid"]] = ev
+                except (ValueError, KeyError):
+                    pass
+                if hog_pid in events:
+                    return
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        t.join(8)
+        row["seconds"] = round(time.monotonic() - t0, 2)
+        ev = events.get(hog_pid)
+        if ev is None:
+            row["error"] = f"watch never flagged the busy loop (events: {list(events)})"
+            return row
+        row["class"] = "onset"
+        row["headline"] = ev["headline"]
+        row["passed"] = "busy" in ev["headline"].lower()
+        return row
+    except Exception as e:
+        row["error"] = repr(e)
+        return row
+    finally:
+        for p in (watcher, hog):
+            if p is not None:
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                p.wait()
+
+
 def main():
     build_c()
     rows = [run_one(*s) for s in SCENARIOS]
     rows.append(run_scan_row())
+    rows.append(run_watch_row())
     passed = sum(r["passed"] for r in rows)
 
     print(f"\n{'scenario':<11} {'verdict':<12} {'want':<12} {'time':>5}  result")

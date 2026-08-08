@@ -105,10 +105,34 @@ fn decapitalize(s: &str) -> String {
     }
 }
 
+// How stuck a thread looks; the most-blocked thread is the story, and the
+// main thread only wins ties. A busy or parked thread is never the story
+// while a sibling is pinned on a lock, an fd, or the kernel.
+fn interest(w: &Wait) -> u8 {
+    match w {
+        Wait::Vfork | Wait::Disk(_) => 6,
+        Wait::Futex { owner: Some(_) } => 5,
+        Wait::OnFd { .. } => 4,
+        Wait::Child => 3,
+        Wait::Futex { owner: None } => 2,
+        Wait::Unknown => 1,
+        Wait::Poll | Wait::Sleep | Wait::Run => 0,
+    }
+}
+
+fn choose_subject(s: &Snapshot) -> Option<&ThreadSnap> {
+    let main = s.main_thread()?;
+    let best = s
+        .threads
+        .iter()
+        .max_by_key(|t| (interest(&classify(t)), t.tid == main.tid))?;
+    Some(if interest(&classify(best)) > interest(&classify(main)) { best } else { main })
+}
+
 /// Which socket inode the subject is actually blocked on, if any.
 /// LINK uses this to hop only where the evidence points.
 pub fn blocking_socket_inode(s: &Snapshot) -> Option<u64> {
-    let subject = s.main_thread()?;
+    let subject = choose_subject(s)?;
     if let Wait::OnFd { fd, .. } = classify(subject) {
         if let Some(FdKind::Socket { inode }) = s.fd(fd).map(|e| &e.kind) {
             return Some(*inode);
@@ -118,7 +142,7 @@ pub fn blocking_socket_inode(s: &Snapshot) -> Option<u64> {
 }
 
 pub fn judge(s: &Snapshot, links: &Links, py: Option<&PySnapshot>) -> Verdict {
-    let Some(subject) = s.main_thread() else {
+    let Some(subject) = choose_subject(s) else {
         return verdict(
             VerdictClass::Refusal,
             format!("no verdict: pid {} has no readable threads", s.pid),
@@ -126,6 +150,21 @@ pub fn judge(s: &Snapshot, links: &Links, py: Option<&PySnapshot>) -> Verdict {
             vec![],
         );
     };
+    let not_main = s.main_thread().is_some_and(|m| m.tid != subject.tid);
+    let mut v = judge_thread(s, links, py, subject);
+    if not_main {
+        v.chain.insert(
+            0,
+            format!(
+                "the main thread is not the story here; thread {} is the most-blocked one",
+                subject.tid
+            ),
+        );
+    }
+    v
+}
+
+fn judge_thread(s: &Snapshot, links: &Links, py: Option<&PySnapshot>, subject: &ThreadSnap) -> Verdict {
     match classify(subject) {
         Wait::Futex { owner: Some(owner) } => futex_owned(s, py, subject, owner),
         Wait::Futex { owner: None } => futex_anonymous(s, py, subject),
@@ -827,6 +866,28 @@ mod tests {
             assert_eq!(v.class, VerdictClass::Causal, "wchan {wchan}");
             assert!(v.headline.contains("vfork"));
         }
+    }
+
+    #[test]
+    fn a_blocked_worker_outranks_an_idle_main_thread() {
+        let mut s = snap(1, vec![
+            thread(1, TaskState::Sleeping, "ep_poll", Some(("epoll_pwait", [0; 6])), None),
+            thread(9, TaskState::Sleeping, "sk_wait_data", Some(("recvfrom", [3, 0, 0, 0, 0, 0])), None),
+        ]);
+        s.fds = vec![FdEntry { fd: 3, kind: FdKind::Socket { inode: 42 }, flags: 2 }];
+        s.sockets.insert(42, SocketConn {
+            proto: "tcp".into(),
+            local: "127.0.0.1:50000".into(),
+            remote: "127.0.0.1:9009".into(),
+            state: "ESTABLISHED".into(),
+            tx_queue: 0,
+            rx_queue: 0,
+        });
+        let v = judge(&s, &Links::default(), None);
+        assert_eq!(v.class, VerdictClass::Partial);
+        assert!(v.headline.contains("9009"));
+        assert!(v.chain[0].contains("thread 9"));
+        assert_eq!(blocking_socket_inode(&s), Some(42));
     }
 
     fn gor(goid: u64, status: &str, reason: &str, func: &str) -> GoRoutine {

@@ -65,6 +65,7 @@ waitson 41337        a pid
 waitson uvicorn      a process name
 waitson :5432        whoever owns that port on this machine
 waitson scan         sweep the whole machine, diagnose what looks stuck in anger
+waitson watch        stay resident; diagnose anything the moment it turns stuck
 waitson doctor       explains attach permissions on this machine
 ```
 
@@ -79,7 +80,7 @@ Five blocks, one pass, all read-only:
 1. **snap** freezes the kernel's view: every thread's state and wait channel, the syscall it is parked in with its arguments, the fd table, socket tables read through the target's own network namespace (containers resolve correctly), pipe endpoints across processes.
 2. **read** opens the runtime: CPython stacks, thread by thread, with GIL ownership and source lines, read from process memory from outside.
 3. **link** crosses boundaries: futex words are read back to their owner threads, pipes to their other ends, and a blocked local socket to the process on the other side, which gets diagnosed one hop deep.
-4. **judge** walks the evidence to a verdict. Deterministic rules, no model, no guessing.
+4. **judge** walks the evidence to a verdict. Deterministic rules, no model, no guessing. The subject is the most-blocked thread, not just the main one, so an idle event loop never hides a stuck worker.
 5. **tell** prints the sentence and the chain. `--json` emits the verdict plus the full wait graph for agents and CI.
 
 Attaching is a brief sample-read-detach. Waitson never writes to the target, never injects, never stops it beyond microsecond samples. It is safe to point at production.
@@ -114,9 +115,11 @@ The test suite is a set of reproducible stuck programs, each with the verdict it
 | wait on a SIGSTOPped child | CAUSAL, resume command given | 0.28s |
 | idle asyncio event loop | OBSERVATION, idle by design | 0.26s |
 | target by `:port` | resolves the owner and diagnoses it | 0.27s |
-| Go channels wedged | PARTIAL, main goroutine's wait reason named | 0.32s |
-| stripped Go binary | REFUSAL, with the rebuild flag that fixes it | 0.26s |
-| machine sweep | `scan` flags the D-state and the busy loop, spares the idle loop | 0.74s |
+| Go channels wedged | PARTIAL, main goroutine's wait reason named | 0.29s |
+| stripped Go binary | REFUSAL, with the rebuild flag that fixes it | 0.27s |
+| worker stuck behind an idle main thread | CAUSAL, the most-blocked thread is the story | 0.41s |
+| machine sweep | `scan` flags the D-state and the busy loop, spares the idle loop | 0.72s |
+| hang introduced under `watch` | flagged at onset, unprompted, in under a second | 0.96s |
 
 Reproduce it: `./hangbook/run.sh` builds everything and scores the matrix in a container. Scenarios that expose a wrong or missing verdict are the contribution we want most.
 
