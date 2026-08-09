@@ -168,9 +168,11 @@ mod linux {
         (n == 4).then(|| u32::from_ne_bytes(buf))
     }
 
-    // The lock owner tid lives in different places per libc: glibc keeps it in
-    // __owner at uaddr+8; musl encodes it in the lock word at uaddr, low bits.
-    // Both candidates go to the caller, which keeps whichever is a real thread.
+    // glibc records the owner tid in __owner at uaddr+8 for every mutex type;
+    // musl keeps it in the lock word at uaddr (low bits) only for
+    // error-checking and robust mutexes, and not at all for normal ones. Both
+    // candidates go to the caller, which keeps whichever is a real thread; a
+    // musl normal mutex yields neither, and the wait stays honestly unowned.
     fn read_futex_owner_candidates(pid: i32, uaddr: u64) -> Vec<i32> {
         let mut out = Vec::new();
         if let Some(v) = uaddr.checked_add(8).and_then(|a| read_u32(pid, a)) {

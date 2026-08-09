@@ -34,7 +34,9 @@ tables, register-to-DWARF mappings) are exercised by CI on `ubuntu-latest`; the
 syscall tables are additionally confirmed under emulation, but ptrace- and
 py-spy-dependent paths (native unwind, GIL reads) need real x86_64 hardware,
 which is what CI provides. waitson builds and runs on musl (Alpine); the lock
-owner read handles both the glibc and musl mutex layouts. Other distros, libc
+owner read handles the glibc layout and musl's error-checking/robust mutexes,
+and honestly reports an unidentifiable holder for a musl normal mutex, which
+does not record its owner anywhere. Other distros, libc
 versions, and language runtimes are untested surface — a failing hangbook
 scenario on your platform is the contribution we want.
 
