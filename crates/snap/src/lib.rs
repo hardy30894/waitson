@@ -160,24 +160,31 @@ mod linux {
         out
     }
 
-    // glibc pthread_mutex_t: __lock (the futex word) at +0, __owner tid at
-    // +8. Garbage reads fail the caller's owner-is-a-thread check.
-    fn read_futex_owner(pid: i32, uaddr: u64) -> Option<i32> {
+    fn read_u32(pid: i32, addr: u64) -> Option<u32> {
         let mut buf = [0u8; 4];
-        let local = libc::iovec {
-            iov_base: buf.as_mut_ptr().cast(),
-            iov_len: 4,
-        };
-        let remote = libc::iovec {
-            iov_base: (uaddr.checked_add(8)?) as *mut libc::c_void,
-            iov_len: 4,
-        };
+        let local = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: 4 };
+        let remote = libc::iovec { iov_base: addr as *mut libc::c_void, iov_len: 4 };
         let n = unsafe { libc::process_vm_readv(pid, &local, 1, &remote, 1, 0) };
-        if n != 4 {
-            return None;
+        (n == 4).then(|| u32::from_ne_bytes(buf))
+    }
+
+    // The lock owner tid lives in different places per libc: glibc keeps it in
+    // __owner at uaddr+8; musl encodes it in the lock word at uaddr, low bits.
+    // Both candidates go to the caller, which keeps whichever is a real thread.
+    fn read_futex_owner_candidates(pid: i32, uaddr: u64) -> Vec<i32> {
+        let mut out = Vec::new();
+        if let Some(v) = uaddr.checked_add(8).and_then(|a| read_u32(pid, a)) {
+            if v > 0 {
+                out.push(v as i32);
+            }
         }
-        let owner = i32::from_ne_bytes(buf);
-        (owner > 0).then_some(owner)
+        if let Some(v) = read_u32(pid, uaddr) {
+            let tid = (v & 0x3fff_ffff) as i32;
+            if tid > 0 {
+                out.push(tid);
+            }
+        }
+        out
     }
 
     fn fdinfo_flags(pid: i32, fd: i32) -> u32 {
@@ -475,7 +482,9 @@ mod linux {
             let futexish = wchan.contains("futex")
                 || syscall.as_ref().and_then(|s| s.name.as_deref()) == Some("futex");
             let futex_owner = match (&syscall, futexish) {
-                (Some(sc), true) if sc.args[0] != 0 => read_futex_owner(pid, sc.args[0]),
+                (Some(sc), true) if sc.args[0] != 0 => read_futex_owner_candidates(pid, sc.args[0])
+                    .into_iter()
+                    .find(|o| *o != tid && tids.contains(o)),
                 _ => None,
             };
             threads.push(ThreadSnap {
@@ -488,13 +497,6 @@ mod linux {
                 cpu_delta: st.ticks.saturating_sub(before.get(&tid).copied().unwrap_or(st.ticks)),
                 futex_owner,
             });
-        }
-        for t in &mut threads {
-            if let Some(owner) = t.futex_owner {
-                if !tids.contains(&owner) {
-                    t.futex_owner = None;
-                }
-            }
         }
 
         let fds = collect_fds(pid);

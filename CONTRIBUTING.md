@@ -27,6 +27,17 @@ A scenario that produces a wrong verdict, a refusal where a verdict was possible
 - **asyncio / tokio pending-task graphs.** Waitson diagnoses the common asyncio freeze — a synchronous call made on the event loop, named down to the coroutine — from the Python stack it can read. Reconstructing "which pending task awaits which" is different: it means walking the loop's private task registry and each coroutine's await chain out of raw CPython memory, with no supported external interface, so a subtly wrong read produces a plausible-but-wrong graph. That part stays unbuilt until it can be validated against ground truth. tokio has no external scheduler introspection at all without instrumentation (tokio-console); a native tokio program still gets its per-thread verdict.
 - **V8 heap-object reading without cooperation.** Native C/C++/Rust unwinds use DWARF `.eh_frame` CFI (frame-pointer walk as fallback), validated against the thread's own `backtrace()` including binaries with no frame pointers. Reading a V8 JavaScript stack out of process without the inspector (the llnode path, via `v8dbg_*` postmortem constants) is deliberately not built: it means decoding pointer-compressed tagged objects through constants that shift every V8 release, the only ground truth to validate against is the inspector that `--cooperate` already uses, and a subtly wrong decode is a plausible-but-wrong stack. `--cooperate` is the supported reader for Node's JS stack; the postmortem decoder is a standing project with a real maintenance cost, not a drop-in.
 
+## Platform validation status
+
+The hangbook is validated on arm64 with glibc. The x86_64 code paths (syscall
+tables, register-to-DWARF mappings) are exercised by CI on `ubuntu-latest`; the
+syscall tables are additionally confirmed under emulation, but ptrace- and
+py-spy-dependent paths (native unwind, GIL reads) need real x86_64 hardware,
+which is what CI provides. waitson builds and runs on musl (Alpine); the lock
+owner read handles both the glibc and musl mutex layouts. Other distros, libc
+versions, and language runtimes are untested surface — a failing hangbook
+scenario on your platform is the contribution we want.
+
 ## Before you open a PR
 
 ```sh

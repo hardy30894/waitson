@@ -183,6 +183,8 @@ git clone https://github.com/hardy30894/waitson && cd waitson
 cargo build --release        # target/release/waitson
 ```
 
+A stripped binary symbolizes to `module+offset`; set `DEBUGINFOD_URLS` (waitson uses the standard `debuginfod-find` client) and it fetches the separate debug symbols and names the frames.
+
 Linux is the full experience: `/proc` and process memory give waitson every layer, and attaching follows the kernel's normal rules (your own processes with `ptrace_scope 0`, otherwise `sudo` or `CAP_SYS_PTRACE`). macOS runs a native tier with honest edges: thread states, cpu attribution, and socket endpoints come through `libproc` with no sudo at all, so busy/stopped/uninterruptible verdicts work on your own processes out of the box; wait *causes* and Python internals need memory reads, which macOS grants only under sudo; `scan`, `watch`, and name/`:port` targeting are Linux-only for now. Where the cause is invisible, waitson refuses and shows what it did see rather than guessing. `waitson doctor` tells you exactly which tier applies on your machine.
 
 ## Contributing

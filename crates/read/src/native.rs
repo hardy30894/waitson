@@ -239,6 +239,19 @@ fn load_module(pid: i32, m: &mut Module, base: u64) {
         .map(|s| m.bias.wrapping_add(s.address()))
         .unwrap_or(m.start);
 
+    m.syms = collect_text_symbols(&file);
+    // A stripped binary has only dynamic symbols; if debuginfod is configured,
+    // fetch the separate debug object by build-id and take its symbol table.
+    if m.syms.len() < 4 {
+        if let Some(extra) = debuginfod_symbols(&file) {
+            if extra.len() > m.syms.len() {
+                m.syms = extra;
+            }
+        }
+    }
+}
+
+fn collect_text_symbols(file: &object::File) -> Vec<(u64, u64, String)> {
     let mut syms = Vec::new();
     for s in file.symbols().chain(file.dynamic_symbols()) {
         if s.kind() == object::SymbolKind::Text && s.size() > 0 {
@@ -249,5 +262,55 @@ fn load_module(pid: i32, m: &mut Module, base: u64) {
     }
     syms.sort_by_key(|(a, _, _)| *a);
     syms.dedup_by_key(|(a, _, _)| *a);
-    m.syms = syms;
+    syms
+}
+
+fn build_id(file: &object::File) -> Option<String> {
+    let data = file.section_by_name(".note.gnu.build-id")?.uncompressed_data().ok()?;
+    parse_build_id_note(&data)
+}
+
+// ELF note: namesz, descsz, type (u32 each), name ("GNU\0"), then descsz
+// bytes of build-id. Emit it as the lowercase hex debuginfod expects.
+fn parse_build_id_note(data: &[u8]) -> Option<String> {
+    let namesz = u32::from_le_bytes(data.get(0..4)?.try_into().ok()?) as usize;
+    let descsz = u32::from_le_bytes(data.get(4..8)?.try_into().ok()?) as usize;
+    let start = 12 + namesz.div_ceil(4) * 4;
+    let id = data.get(start..start + descsz)?;
+    Some(id.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+// Only when the user opted in via DEBUGINFOD_URLS, and via the canonical
+// debuginfod-find client so caching, TLS, and mirror selection are its job.
+fn debuginfod_symbols(file: &object::File) -> Option<Vec<(u64, u64, String)>> {
+    std::env::var("DEBUGINFOD_URLS").ok().filter(|u| !u.trim().is_empty())?;
+    let id = build_id(file)?;
+    let out = std::process::Command::new("debuginfod-find")
+        .args(["debuginfo", &id])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let bytes = std::fs::read(&path).ok()?;
+    let dbg = object::File::parse(&*bytes).ok()?;
+    let syms = collect_text_symbols(&dbg);
+    (!syms.is_empty()).then_some(syms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_build_id_note;
+
+    #[test]
+    fn build_id_note_parses_to_hex() {
+        let mut note = Vec::new();
+        note.extend_from_slice(&4u32.to_le_bytes()); // namesz "GNU\0"
+        note.extend_from_slice(&4u32.to_le_bytes()); // descsz
+        note.extend_from_slice(&3u32.to_le_bytes()); // NT_GNU_BUILD_ID
+        note.extend_from_slice(b"GNU\0");
+        note.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(parse_build_id_note(&note).as_deref(), Some("deadbeef"));
+    }
 }
