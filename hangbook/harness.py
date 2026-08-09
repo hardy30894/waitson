@@ -50,9 +50,14 @@ def build_c():
             ["gcc", "-O0", "-pthread", os.path.join(ROOT, "scenarios", f"{src}.c"), "-o", f"{BUILD}/{src}"],
             check=True,
         )
+    cstack_src = os.path.join(ROOT, "scenarios", "cstack.c")
     subprocess.run(
-        ["gcc", "-O0", "-g", "-fno-omit-frame-pointer", "-pthread", "-rdynamic",
-         os.path.join(ROOT, "scenarios", "cstack.c"), "-o", f"{BUILD}/cstack"],
+        ["gcc", "-O0", "-g", "-fno-omit-frame-pointer", "-pthread", "-rdynamic", cstack_src, "-o", f"{BUILD}/cstack"],
+        check=True,
+    )
+    # No frame pointers: only the .eh_frame CFI walk can recover this chain.
+    subprocess.run(
+        ["gcc", "-O0", "-g", "-fomit-frame-pointer", "-pthread", "-rdynamic", cstack_src, "-o", f"{BUILD}/cstack_nofp"],
         check=True,
     )
     goenv = {**os.environ, "GOCACHE": "/tmp/gocache"}
@@ -271,12 +276,10 @@ def run_cooperate_rows():
     return rows
 
 
-def run_cstack_row():
-    """Native C unwind held against the thread's own backtrace(): level1,
-    level2, level3 must appear in the verdict in that order."""
-    row = {"name": "cstack", "expected": "GROUNDTRUTH", "passed": False}
+def _cstack_case(name, binary, out_file):
+    row = {"name": name, "expected": "GROUNDTRUTH", "passed": False}
     proc = subprocess.Popen(
-        [f"{BUILD}/cstack"], cwd=ROOT,
+        [f"{BUILD}/{binary}", out_file], cwd=ROOT,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
     )
     try:
@@ -294,7 +297,7 @@ def run_cstack_row():
         row["class"] = verdict["class"]
         row["headline"] = native or verdict["headline"]
 
-        truth = open(f"{BUILD}/cstack.txt").read()
+        truth = open(out_file).read()
         order_ok = lambda s: "level1" in s and s.index("level1") < s.index("level2") < s.index("level3")
         row["passed"] = order_ok(truth) and order_ok(text)
         return row
@@ -307,6 +310,16 @@ def run_cstack_row():
         except (ProcessLookupError, PermissionError):
             pass
         proc.wait()
+
+
+def run_cstack_row():
+    """Native C unwind (frame pointers present) vs the thread's backtrace()."""
+    return _cstack_case("cstack", "cstack", "/tmp/hb/cstack.txt")
+
+
+def run_cfistack_row():
+    """No frame pointers: only .eh_frame CFI can recover this chain."""
+    return _cstack_case("cfistack", "cstack_nofp", "/tmp/hb/cfistack.txt")
 
 
 def run_gounwind_row():
@@ -464,6 +477,7 @@ def main():
     rows.append(run_overhead_row())
     rows.append(run_gounwind_row())
     rows.append(run_cstack_row())
+    rows.append(run_cfistack_row())
     rows.extend(run_cooperate_rows())
     passed = sum(r["passed"] for r in rows)
 

@@ -5,10 +5,12 @@
 
 static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
 
+static const char *out_path = "/tmp/hb/cstack.txt";
+
 void level1(void) {
     void *bt[16];
     int n = backtrace(bt, 16);
-    FILE *f = fopen("/tmp/hb/cstack.txt", "w");
+    FILE *f = fopen(out_path, "w");
     backtrace_symbols_fd(bt, n, fileno(f));
     fclose(f);
     pthread_mutex_lock(&m);
@@ -22,7 +24,10 @@ void *worker(void *arg) {
     return NULL;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 1) {
+        out_path = argv[1];
+    }
     pthread_mutex_lock(&m);
     pthread_t t;
     pthread_create(&t, NULL, worker, NULL);

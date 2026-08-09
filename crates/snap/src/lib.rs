@@ -296,10 +296,10 @@ mod linux {
         out
     }
 
-    // Registers of a blocked thread: briefly seize and interrupt it (py-spy's
-    // pattern), read the register set, detach. pc, sp, and fp are enough to
-    // seed a CFI or frame-pointer unwind.
-    pub fn thread_registers(tid: i32) -> Option<(u64, u64, u64, u64)> {
+    // Raw GETREGSET NT_PRSTATUS array of a blocked thread: briefly seize and
+    // interrupt it (py-spy's pattern), read, detach. The waitpid is bounded
+    // because a blocking wait never returns on a D-state thread.
+    pub fn thread_regfile(tid: i32) -> Option<Vec<u64>> {
         const PTRACE_SEIZE: u32 = 0x4206;
         const PTRACE_INTERRUPT: u32 = 0x4207;
         const PTRACE_DETACH: u32 = 17;
@@ -324,29 +324,27 @@ mod linux {
                 libc::ptrace(PTRACE_DETACH as _, tid, std::ptr::null_mut::<libc::c_void>(), std::ptr::null_mut::<libc::c_void>());
                 return None;
             }
-
-            let mut regs = [0u64; 34];
+            let mut regs = vec![0u64; 34];
             let mut iov = libc::iovec {
                 iov_base: regs.as_mut_ptr().cast(),
-                iov_len: std::mem::size_of_val(&regs),
+                iov_len: std::mem::size_of::<u64>() * regs.len(),
             };
             let rc = libc::ptrace(PTRACE_GETREGSET as _, tid, NT_PRSTATUS as *mut libc::c_void, &mut iov as *mut _ as *mut libc::c_void);
             libc::ptrace(PTRACE_DETACH as _, tid, std::ptr::null_mut::<libc::c_void>(), std::ptr::null_mut::<libc::c_void>());
-            if rc != 0 {
-                return None;
-            }
-            // user_regs_struct layout: x86_64 rip@16 words in, rsp@19, rbp@4;
-            // aarch64 regs[0..30]=x0..x30, sp@31, pc@32, and x29 is the fp.
-            #[cfg(target_arch = "x86_64")]
-            let (pc, sp, fp) = (regs[16], regs[19], regs[4]);
-            #[cfg(target_arch = "aarch64")]
-            let (pc, sp, fp) = (regs[32], regs[31], regs[29]);
-            #[cfg(target_arch = "aarch64")]
-            let lr = regs[30];
-            #[cfg(target_arch = "x86_64")]
-            let lr = 0u64;
-            Some((pc, sp, fp, lr))
+            (rc == 0).then_some(regs)
         }
+    }
+
+    // pc, sp, fp, lr from the raw register file, for the frame-pointer walk.
+    pub fn thread_registers(tid: i32) -> Option<(u64, u64, u64, u64)> {
+        let regs = thread_regfile(tid)?;
+        #[cfg(target_arch = "x86_64")]
+        let out = (regs[16], regs[19], regs[4], 0);
+        #[cfg(target_arch = "aarch64")]
+        let out = (regs[32], regs[31], regs[29], regs[30]);
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        let out = (0, 0, 0, 0);
+        Some(out)
     }
 
     pub fn read_mem(pid: i32, addr: u64, len: usize) -> Option<Vec<u8>> {
@@ -677,7 +675,7 @@ mod macos {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{collect, read_mem, socket_inode_owner, thread_registers};
+pub use linux::{collect, read_mem, socket_inode_owner, thread_regfile, thread_registers};
 
 #[cfg(target_os = "macos")]
 pub use macos::collect;
@@ -702,6 +700,11 @@ pub fn read_mem(_pid: i32, _addr: u64, _len: usize) -> Option<Vec<u8>> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn thread_registers(_tid: i32) -> Option<(u64, u64, u64, u64)> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn thread_regfile(_tid: i32) -> Option<Vec<u64>> {
     None
 }
 
