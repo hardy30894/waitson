@@ -21,6 +21,12 @@ A scenario that produces a wrong verdict, a refusal where a verdict was possible
 - **Read-only, do no harm.** Waitson samples and detaches; it never writes to, injects into, or stops a target. The `overhead` hangbook row measures this and gates on it.
 - **Runtimes plug in behind a trait.** A new language reader implements the same seam Python, Go, and the JVM already use; the core does not change to accommodate it.
 
+## What waitson deliberately does not do yet
+
+- **Node/V8 stacks.** V8 keeps the JavaScript stack in JIT-managed memory with no supported out-of-process layout. Waitson detects Node and refuses with that reason. A real reader would need to track V8's internal frame format, which changes without notice; until that exists, a guess is worse than a refusal.
+- **asyncio / tokio task graphs.** Reconstructing "which task awaits which" post-hoc means walking the event loop's private task registry (CPython object graph) or tokio's scheduler internals, neither of which is a supported external interface. Waitson gives the honest verdict it can prove — the loop is idle, or a specific OS thread is blocked on a specific resource — and does not draw a task graph it cannot verify. A correct reader here is welcome; a plausible-but-wrong one is not.
+- **Full frame-pointer unwinds for C/C++.** Native verdicts name the blocking syscall and the owning thread, not yet the full C call stack. DWARF CFI unwinding is the path; it must validate against a known stack before it ships.
+
 ## Before you open a PR
 
 ```sh

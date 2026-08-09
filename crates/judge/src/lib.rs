@@ -655,6 +655,33 @@ pub fn judge_jvm(_s: &Snapshot, jvm: &JvmSnapshot) -> Verdict {
     )
 }
 
+/// V8 keeps its JavaScript call stack in JIT-managed memory with no stable
+/// external layout and no supported out-of-process reader (unlike CPython
+/// and Go). A kernel-level verdict on the event loop would miss the JS
+/// cause, so waitson refuses rather than mislead — the honest state until a
+/// V8 reader exists.
+pub fn node_refusal(s: &Snapshot) -> Verdict {
+    let mut seen: Vec<String> = s
+        .threads
+        .iter()
+        .map(|t| format!("tid {} {:?} wchan={} syscall={}", t.tid, t.state, t.wchan, t.syscall.as_ref().and_then(|x| x.name.as_deref()).unwrap_or("?")))
+        .collect();
+    for c in s.sockets.values() {
+        if c.state == "ESTABLISHED" {
+            seen.push(format!("open connection: {} → {} (rx {}, tx {})", c.local, c.remote, c.rx_queue, c.tx_queue));
+        }
+    }
+    verdict(
+        VerdictClass::Refusal,
+        "a Node/V8 runtime: the JavaScript stack lives in JIT memory with no external reader yet, so the event-loop kernel view cannot name the JS cause — refusing rather than guessing".into(),
+        vec![
+            "the libuv event loop thread is almost always parked in epoll; that tells you nothing about which callback is stuck".into(),
+            "the kernel-level facts gathered anyway are in the evidence".into(),
+        ],
+        seen,
+    )
+}
+
 pub fn jvm_refusal(s: &Snapshot, reason: &str) -> Verdict {
     let seen: Vec<String> = s
         .threads

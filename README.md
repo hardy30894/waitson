@@ -52,7 +52,9 @@ waitson: pid 41610 (api) — waiting at the Go level: the main goroutine is bloc
   → 1× IO wait in main.listen (api/server.go:88)
 ```
 
-Which line is stuck, the call chain that got there, and the `go` statement that started it — resolved from the binary's own gopclntab and unwound with the runtime's own pcsp tables. The unwinder is held against `runtime.Stack` ground truth in the test suite: waitson's frames must match the runtime's own report of the same process, frame for frame, or the suite fails.
+Which line is stuck, the call chain that got there — inlined frames expanded and all — and the `go` statement that started it, resolved from the binary's own gopclntab and unwound with the runtime's own pcsp and inline tables. The unwinder is held against `runtime.Stack` ground truth in the test suite: waitson's frames must match the runtime's own report of the same process, frame for frame including inlined calls, or the suite fails.
+
+Runtimes with no supported external reader get a refusal, not a guess. A Node/V8 process (JavaScript stack in JIT memory) and a stripped Go binary both say exactly why they can't be read and what would fix it — waitson never invents a call stack it cannot see.
 
 And when nothing is wrong, it says so, which is also an answer:
 
@@ -105,7 +107,7 @@ Every run ends in exactly one of four classes:
 | `OBSERVATION` | nothing is stuck: busy, sleeping, or idle by design, and here is why |
 | `REFUSAL` | it cannot be read truthfully, and here is exactly what is missing |
 
-Refusals are a feature. Go programs, for example, multiplex goroutines over threads, so kernel-level facts cannot distinguish a stuck Go program from an idle one. Waitson detects a Go binary and refuses with that reason rather than shipping a plausible guess, until its goroutine reader exists.
+Refusals are a feature. A Node/V8 process keeps its JavaScript stack in JIT memory with no supported external reader, so a kernel-level verdict would miss the real cause; waitson detects it and refuses with that reason rather than shipping a plausible guess. A Go binary stripped of its symbols gets the same treatment, naming the build flag that would fix it. Waitson never invents a stack it cannot see.
 
 ## The hangbook
 
@@ -125,7 +127,9 @@ The test suite is a set of reproducible stuck programs, each with the verdict it
 | idle asyncio event loop | OBSERVATION, idle by design | 0.26s |
 | target by `:port` | resolves the owner and diagnoses it | 0.27s |
 | Go channels wedged | PARTIAL, main goroutine's wait reason named | 0.29s |
+| Go inlined call chain | frames match `runtime.Stack`, inlined calls expanded | 0.29s |
 | stripped Go binary | REFUSAL, with the rebuild flag that fixes it | 0.27s |
+| Node/V8 process | REFUSAL, JS stack lives in JIT memory, reason named | 0.30s |
 | worker stuck behind an idle main thread | CAUSAL, the most-blocked thread is the story | 0.43s |
 | blocked on a file lock | CAUSAL, holder pid and the actual file path named | 0.30s |
 | Java monitor deadlock | CAUSAL, cycle proven from the JVM's own thread dump | 0.53s |

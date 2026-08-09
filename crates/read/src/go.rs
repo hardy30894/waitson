@@ -28,12 +28,15 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
 
     let mut allgs_addr = None;
     let mut reasons_sym = None;
+    let mut gofunc_addr = None;
     let mut funcs: Vec<(u64, u64, String)> = Vec::new();
     for sym in file.symbols() {
         let Ok(name) = sym.name() else { continue };
         match name {
             "runtime.allgs" => allgs_addr = Some(sym.address()),
             "runtime.waitReasonStrings" => reasons_sym = Some((sym.address(), sym.size())),
+            // go.func.* before Go 1.20, go:func.* after (the go: prefix change).
+            "go:func.*" | "go.func.*" => gofunc_addr = Some(sym.address()),
             _ => {
                 if sym.kind() == object::SymbolKind::Text && sym.size() > 0 {
                     funcs.push((sym.address(), sym.size(), name.to_string()));
@@ -59,7 +62,21 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
         .section_by_name(".gopclntab")
         .or_else(|| file.section_by_name("__gopclntab"))
         .and_then(|s| s.uncompressed_data().ok());
-    let pcln = pcln_data.as_deref().and_then(crate::pclntab::Pclntab::parse);
+    // go:func.* is the base the inline-tree funcdata offsets are measured
+    // from; slice the section that contains it so inline frames resolve.
+    let gofunc_section = gofunc_addr.and_then(|addr| {
+        file.sections()
+            .find(|s| addr >= s.address() && addr < s.address() + s.size())
+            .map(|s| (s, addr))
+    });
+    let gofunc_data = gofunc_section.as_ref().and_then(|(s, _)| s.uncompressed_data().ok());
+    let gofunc_slice = match (&gofunc_data, &gofunc_section) {
+        (Some(d), Some((s, addr))) => d.get(((addr - s.address()) as usize)..),
+        _ => None,
+    };
+    let pcln = pcln_data
+        .as_deref()
+        .and_then(|d| crate::pclntab::Pclntab::parse_with(d, gofunc_slice));
 
     let hdr = mem(pid, allgs_addr, 16)?;
     let arr = u64le(&hdr[0..8]);
@@ -172,11 +189,15 @@ fn unwind(pid: i32, pcln: &crate::pclntab::Pclntab, bias: u64, mut pc: u64, mut 
     let mut out = Vec::new();
     for i in 0..32 {
         let lookup = pc.wrapping_sub(bias).wrapping_sub(if i == 0 { 0 } else { 1 });
-        let Some((name, file, line)) = pcln.resolve(lookup) else { break };
-        if name == "runtime.goexit" || name.is_empty() {
+        let Some((phys, _, _)) = pcln.resolve(lookup) else { break };
+        if phys == "runtime.goexit" || phys.is_empty() {
             break;
         }
-        out.push(format!("{name} ({}:{line})", short_path(&file)));
+        // One physical frame expands to every source frame inlined into it,
+        // innermost first, matching the runtime's own traceback.
+        for (name, file, line) in pcln.resolve_frames(lookup) {
+            out.push(format!("{name} ({}:{line})", short_path(&file)));
+        }
         let Some(delta) = pcln.sp_delta(lookup) else { break };
         let delta = delta.max(0) as u64;
         let (ret, next_sp) = if cfg!(target_arch = "aarch64") {

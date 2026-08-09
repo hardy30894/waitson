@@ -45,6 +45,8 @@ fn diagnose(argv: &[String], json: bool) {
             Ok(jvm) => waitson_judge::judge_jvm(&snap, &jvm),
             Err(reason) => waitson_judge::jvm_refusal(&snap, &reason),
         }
+    } else if waitson_read::looks_node(pid) {
+        waitson_judge::node_refusal(&snap)
     } else {
         waitson_judge::judge(&snap, &links, py.as_ref())
     };

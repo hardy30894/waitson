@@ -10,3 +10,6 @@ waitson-snap.workspace = true
 py-spy.workspace = true
 object = "0.36"
 gimli = "0.31"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = "0.14"

@@ -35,11 +35,25 @@ pub fn python_snapshot(pid: i32) -> Option<PySnapshot> {
 }
 
 fn looks_python(pid: i32) -> bool {
+    exe_name(pid).is_some_and(|f| f.contains("python"))
+}
+
+pub fn looks_node(pid: i32) -> bool {
+    exe_name(pid).is_some_and(|f| f == "node" || f == "nodejs")
+}
+
+#[cfg(target_os = "linux")]
+fn exe_name(pid: i32) -> Option<String> {
     std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
         .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
-        .map(|f| f.contains("python"))
-        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exe_name(pid: i32) -> Option<String> {
+    libproc::libproc::proc_pid::pidpath(pid)
+        .ok()
+        .and_then(|p| std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()))
 }
 
 /// Every Go binary embeds a "Go buildinf:" block near the front of the

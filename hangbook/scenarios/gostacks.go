@@ -7,16 +7,10 @@ import (
 	"time"
 )
 
-// noinline keeps c, b, a as real frames: the unwinder is what is under
-// test here, and runtime.Stack must describe the same physical stack.
-//
-//go:noinline
+// a, b, c inline into one physical frame; waitson's inline-tree expansion
+// must recover all three, and the harness holds them against runtime.Stack.
 func c(ch chan int) { <-ch }
-
-//go:noinline
 func b(ch chan int) { c(ch) }
-
-//go:noinline
 func a(ch chan int) { b(ch) }
 
 // The runtime's own view of every stack lands in gostacks.txt; the harness
