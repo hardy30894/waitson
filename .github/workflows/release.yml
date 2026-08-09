@@ -32,3 +32,30 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: waitson-${{ matrix.target }}.tar.gz
+
+  packages:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: publish npm
+        working-directory: npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: publish pypi
+        working-directory: python
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}

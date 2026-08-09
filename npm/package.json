@@ -1,0 +1,12 @@
+{
+  "name": "waitson",
+  "version": "0.1.0",
+  "description": "Point it at any process. It tells you what the process is waiting for.",
+  "license": "Apache-2.0",
+  "repository": "github:hardy30894/waitson",
+  "bin": { "waitson": "bin.js" },
+  "scripts": { "postinstall": "node install.js" },
+  "files": ["bin.js", "install.js"],
+  "os": ["linux", "darwin"],
+  "engines": { "node": ">=16" }
+}

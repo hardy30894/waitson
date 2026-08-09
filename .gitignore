@@ -1,3 +1,7 @@
 /target
 __pycache__/
 hangbook/results.json
+npm/bin/
+python/dist/
+python/build/
+*.egg-info/

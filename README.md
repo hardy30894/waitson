@@ -160,6 +160,12 @@ Reproduce it: `./hangbook/run.sh` builds everything and scores the matrix in a c
 curl -fsSL https://raw.githubusercontent.com/hardy30894/waitson/main/install.sh | sh
 ```
 
+or through your package manager:
+
+```sh
+npm install -g waitson      # or: pip install waitson
+```
+
 One static binary, no runtime, no account. Then `waitson doctor` checks attach permissions on your machine.
 
 ## Build from source
