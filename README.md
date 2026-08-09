@@ -107,7 +107,16 @@ Every run ends in exactly one of four classes:
 | `OBSERVATION` | nothing is stuck: busy, sleeping, or idle by design, and here is why |
 | `REFUSAL` | it cannot be read truthfully, and here is exactly what is missing |
 
-Refusals are a feature. A Node/V8 process keeps its JavaScript stack in JIT memory with no supported external reader, so a kernel-level verdict would miss the real cause; waitson detects it and refuses with that reason rather than shipping a plausible guess. A Go binary stripped of its symbols gets the same treatment, naming the build flag that would fix it. Waitson never invents a stack it cannot see.
+Refusals are a feature. A parked Node or Bun process keeps its JavaScript stack in JIT memory with no supported external reader, so a kernel-level verdict would miss the real cause; waitson detects the runtime, names the engine, and refuses rather than shipping a plausible guess. A Go binary stripped of its symbols gets the same treatment, naming the build flag that would fix it. Waitson never invents a stack it cannot see.
+
+For Node there is one opt-in step further: `waitson <pid> --cooperate` activates the target's own inspector (the same SIGUSR1 mechanism `node --inspect` uses), pauses V8, and names the JavaScript line that never returns to the event loop:
+
+```
+$ waitson 41712 --cooperate
+waitson: pid 41712 (node) — wedged executing JavaScript: retryLoop (api/queue.js:83) never returns to the event loop
+```
+
+It is the one mode that touches the target, and it says so: the debug port stays open afterward. If no JavaScript is executing at all, it says that instead, which rules out a JS wedge in one command.
 
 ## The hangbook
 
@@ -133,6 +142,8 @@ The test suite is a set of reproducible stuck programs, each with the verdict it
 | worker stuck behind an idle main thread | CAUSAL, the most-blocked thread is the story | 0.43s |
 | blocked on a file lock | CAUSAL, holder pid and the actual file path named | 0.30s |
 | Java monitor deadlock | CAUSAL, cycle proven from the JVM's own thread dump | 0.53s |
+| Node spin loop under `--cooperate` | CAUSAL, the JS line named via Node's own inspector | measured |
+| idle Node under `--cooperate` | OBSERVATION, no JS executing, rules out a JS wedge | measured |
 | machine sweep | `scan` flags D-state, busy loop, and unread socket data; spares the idle loop | 0.91s |
 | hang introduced under `watch` | flagged at onset, unprompted, in under a second | 0.98s |
 | `snap \| judge` pipeline | same verdict class offline, exit code honored | 0.27s |

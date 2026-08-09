@@ -5,13 +5,15 @@ use waitson_schema::{Links, Snapshot, Verdict, VerdictClass};
 mod scan;
 mod watch;
 
-const USAGE: &str = "usage: waitson <pid | name | :port> [--json] [--window-ms N]
+const USAGE: &str = "usage: waitson <pid | name | :port> [--json] [--window-ms N] [--cooperate]
        waitson snap <pid | name | :port> [--window-ms N]
        waitson judge [--json]              (reads a snap from stdin)
        waitson scan [--json]
        waitson watch [--json]
        waitson doctor
 
+--cooperate  Node only: start the target's own inspector (SIGUSR1) and pause
+             V8 to name the JS cause; the target's debug port stays open after
 exit codes: 0 a verdict; 1 a refusal; 2 could not run";
 
 fn main() {
@@ -29,10 +31,32 @@ fn main() {
 }
 
 fn diagnose(argv: &[String], json: bool) {
+    let cooperate = argv.iter().any(|a| a == "--cooperate");
     let (target, window_ms) = parse_target_args(argv);
     let pid = resolve_target(&target).unwrap_or_else(|e| die(&e));
 
     let snap = collect_or_die(pid, window_ms);
+    if cooperate {
+        if waitson_read::looks_js(pid).map(|(r, _)| r) != Some("Node") {
+            die("waitson: --cooperate uses Node's inspector signal; the target is not Node");
+        }
+        let verdict = match waitson_read::cooperate(pid) {
+            Ok(js) => waitson_judge::judge_js_cooperative(&snap, &js),
+            Err(reason) => Verdict {
+                class: VerdictClass::Refusal,
+                headline: format!("the inspector could not cooperate: {reason}"),
+                chain: vec!["the kernel-level view is available without --cooperate".into()],
+                evidence: vec![],
+            },
+        };
+        if json {
+            let payload = serde_json::json!({ "verdict": verdict });
+            println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        } else {
+            render(pid, &snap.comm, &verdict);
+        }
+        exit_by_class(&verdict);
+    }
     let links = waitson_link::resolve(&snap);
     let py = waitson_read::python_snapshot(pid);
     let verdict = if waitson_read::looks_go(pid) {
@@ -92,7 +116,7 @@ fn parse_target_args(args: &[String]) -> (String, u64) {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--json" => {}
+            "--json" | "--cooperate" => {}
             "--window-ms" => {
                 window_ms = it
                     .next()

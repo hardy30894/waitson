@@ -682,8 +682,41 @@ pub fn judge_js(s: &Snapshot, links: &Links, runtime: &str, engine: &str) -> Ver
         vec![
             "every thread is parked the way an idle event loop parks; nothing at the kernel layer names a cause".into(),
             "a kernel-visible wait (blocked fd, held lock, stuck child) would have produced a verdict instead".into(),
+            if runtime == "Node" {
+                format!("opt-in: waitson {} --cooperate uses Node's own inspector to name the JS cause (the debug port stays open after)", s.pid)
+            } else {
+                format!("{runtime} has no post-hoc inspector signal; restart it with --inspect to make it cooperate")
+            },
         ],
         seen,
+    )
+}
+
+pub fn judge_js_cooperative(s: &Snapshot, js: &waitson_schema::JsStackView) -> Verdict {
+    if js.executing {
+        let top = js
+            .frames
+            .first()
+            .map(|(f, u, l)| format!("{f} ({u}:{l})"))
+            .unwrap_or_else(|| "<unknown frame>".into());
+        return verdict(
+            VerdictClass::Causal,
+            format!("wedged executing JavaScript: {top} never returns to the event loop"),
+            js.frames
+                .iter()
+                .map(|(f, u, l)| format!("{f} ({u}:{l})"))
+                .collect(),
+            vec!["paused and resumed via the runtime's own inspector; its debug port remains open".into()],
+        );
+    }
+    verdict(
+        VerdictClass::Observation,
+        "no JavaScript is executing: every callback has returned, and the process is awaiting events that are not arriving".into(),
+        vec![
+            "the inspector attached but V8 had nothing to pause; the wedge is not a JS loop".into(),
+            format!("kernel view: {} threads, all parked", s.threads.len()),
+        ],
+        vec!["a pending await or an event source that never fires cannot be named from outside yet".into()],
     )
 }
 

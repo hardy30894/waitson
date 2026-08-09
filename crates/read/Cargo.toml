@@ -10,6 +10,9 @@ waitson-snap.workspace = true
 py-spy.workspace = true
 object = "0.36"
 gimli = "0.31"
+libc.workspace = true
+serde_json.workspace = true
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14"

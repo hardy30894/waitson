@@ -223,6 +223,49 @@ def run_watch_row():
                 p.wait()
 
 
+def run_cooperate_rows():
+    """--cooperate on a JS spin loop must name the JS line via the
+    inspector; on an idle loop it must say no JS is executing."""
+    rows = []
+    for name, script, expected, needles in [
+        ("coop-spin", "scenarios/nodespin.js", "CAUSAL", [["nodespin.js"], ["javascript"]]),
+        ("coop-idle", "scenarios/nodehang.js", "OBSERVATION", [["no javascript"]]),
+    ]:
+        row = {"name": name, "expected": expected, "passed": False}
+        proc = subprocess.Popen(
+            ["node", script], cwd=ROOT,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+        )
+        try:
+            target = read_ready(proc)
+            if target is None:
+                row["error"] = "scenario never printed READY"
+                continue
+            time.sleep(0.8)
+            t0 = time.monotonic()
+            out = subprocess.run(
+                [BIN, str(target), "--cooperate", "--json"], capture_output=True, text=True, timeout=15
+            )
+            row["seconds"] = round(time.monotonic() - t0, 2)
+            verdict = json.loads(out.stdout)["verdict"]
+            row["class"] = verdict["class"]
+            row["headline"] = verdict["headline"]
+            text = json.dumps(verdict).lower()
+            row["passed"] = verdict["class"] == expected and all(
+                any(n.lower() in text for n in group) for group in needles
+            )
+        except Exception as e:
+            row["error"] = repr(e)
+        finally:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait()
+            rows.append(row)
+    return rows
+
+
 def run_gounwind_row():
     """Waitson's goroutine unwind, held against runtime.Stack ground truth:
     the a->b->c chain must appear in the verdict in the same order the
@@ -377,6 +420,7 @@ def main():
     rows.append(run_pipes_row())
     rows.append(run_overhead_row())
     rows.append(run_gounwind_row())
+    rows.extend(run_cooperate_rows())
     passed = sum(r["passed"] for r in rows)
 
     print(f"\n{'scenario':<11} {'verdict':<12} {'want':<12} {'time':>5}  result")

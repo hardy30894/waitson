@@ -167,6 +167,12 @@ pub struct GoSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsStackView {
+    pub executing: bool,
+    pub frames: Vec<(String, String, u32)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JvmThread {
     pub name: String,
     pub state: String,
