@@ -3,10 +3,12 @@ use waitson_schema::{PyFrame, PySnapshot, PyThread};
 mod cdp;
 mod go;
 mod jvm;
+mod native;
 mod pclntab;
 pub use cdp::cooperate;
 pub use go::go_snapshot;
 pub use jvm::{jvm_snapshot, looks_java};
+pub use native::native_stack;
 
 pub fn python_snapshot(pid: i32) -> Option<PySnapshot> {
     if !looks_python(pid) {

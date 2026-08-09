@@ -50,6 +50,11 @@ def build_c():
             ["gcc", "-O0", "-pthread", os.path.join(ROOT, "scenarios", f"{src}.c"), "-o", f"{BUILD}/{src}"],
             check=True,
         )
+    subprocess.run(
+        ["gcc", "-O0", "-g", "-fno-omit-frame-pointer", "-pthread", "-rdynamic",
+         os.path.join(ROOT, "scenarios", "cstack.c"), "-o", f"{BUILD}/cstack"],
+        check=True,
+    )
     goenv = {**os.environ, "GOCACHE": "/tmp/gocache"}
     src = os.path.join(ROOT, "scenarios", "gochan.go")
     subprocess.run(["go", "build", "-o", f"{BUILD}/gochan", src], env=goenv, check=True)
@@ -266,6 +271,44 @@ def run_cooperate_rows():
     return rows
 
 
+def run_cstack_row():
+    """Native C unwind held against the thread's own backtrace(): level1,
+    level2, level3 must appear in the verdict in that order."""
+    row = {"name": "cstack", "expected": "GROUNDTRUTH", "passed": False}
+    proc = subprocess.Popen(
+        [f"{BUILD}/cstack"], cwd=ROOT,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+    )
+    try:
+        target = read_ready(proc)
+        if target is None:
+            row["error"] = "scenario never printed READY"
+            return row
+        time.sleep(0.8)
+        t0 = time.monotonic()
+        out = subprocess.run([BIN, str(target), "--json"], capture_output=True, text=True, timeout=10)
+        row["seconds"] = round(time.monotonic() - t0, 2)
+        verdict = json.loads(out.stdout)["verdict"]
+        text = json.dumps(verdict)
+        native = next((l for l in verdict["chain"] if l.startswith("native stack")), "")
+        row["class"] = verdict["class"]
+        row["headline"] = native or verdict["headline"]
+
+        truth = open(f"{BUILD}/cstack.txt").read()
+        order_ok = lambda s: "level1" in s and s.index("level1") < s.index("level2") < s.index("level3")
+        row["passed"] = order_ok(truth) and order_ok(text)
+        return row
+    except Exception as e:
+        row["error"] = repr(e)
+        return row
+    finally:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+
+
 def run_gounwind_row():
     """Waitson's goroutine unwind, held against runtime.Stack ground truth:
     the a->b->c chain must appear in the verdict in the same order the
@@ -420,6 +463,7 @@ def main():
     rows.append(run_pipes_row())
     rows.append(run_overhead_row())
     rows.append(run_gounwind_row())
+    rows.append(run_cstack_row())
     rows.extend(run_cooperate_rows())
     passed = sum(r["passed"] for r in rows)
 

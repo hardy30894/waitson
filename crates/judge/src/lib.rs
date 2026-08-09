@@ -119,6 +119,11 @@ fn interest(w: &Wait) -> u8 {
     }
 }
 
+/// The tid whose wait is the story, for a native stack unwind.
+pub fn subject_tid(s: &Snapshot) -> Option<i32> {
+    choose_subject(s).map(|t| t.tid)
+}
+
 fn choose_subject(s: &Snapshot) -> Option<&ThreadSnap> {
     let main = s.main_thread()?;
     let best = s

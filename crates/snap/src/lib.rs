@@ -296,6 +296,59 @@ mod linux {
         out
     }
 
+    // Registers of a blocked thread: briefly seize and interrupt it (py-spy's
+    // pattern), read the register set, detach. pc, sp, and fp are enough to
+    // seed a CFI or frame-pointer unwind.
+    pub fn thread_registers(tid: i32) -> Option<(u64, u64, u64, u64)> {
+        const PTRACE_SEIZE: u32 = 0x4206;
+        const PTRACE_INTERRUPT: u32 = 0x4207;
+        const PTRACE_DETACH: u32 = 17;
+        const PTRACE_GETREGSET: u32 = 0x4204;
+        const NT_PRSTATUS: u32 = 1;
+
+        unsafe {
+            if libc::ptrace(PTRACE_SEIZE as _, tid, std::ptr::null_mut::<libc::c_void>(), std::ptr::null_mut::<libc::c_void>()) != 0 {
+                return None;
+            }
+            libc::ptrace(PTRACE_INTERRUPT as _, tid, std::ptr::null_mut::<libc::c_void>(), std::ptr::null_mut::<libc::c_void>());
+            let mut status = 0;
+            let mut stopped = false;
+            for _ in 0..50 {
+                if libc::waitpid(tid, &mut status, libc::WNOHANG) == tid {
+                    stopped = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if !stopped {
+                libc::ptrace(PTRACE_DETACH as _, tid, std::ptr::null_mut::<libc::c_void>(), std::ptr::null_mut::<libc::c_void>());
+                return None;
+            }
+
+            let mut regs = [0u64; 34];
+            let mut iov = libc::iovec {
+                iov_base: regs.as_mut_ptr().cast(),
+                iov_len: std::mem::size_of_val(&regs),
+            };
+            let rc = libc::ptrace(PTRACE_GETREGSET as _, tid, NT_PRSTATUS as *mut libc::c_void, &mut iov as *mut _ as *mut libc::c_void);
+            libc::ptrace(PTRACE_DETACH as _, tid, std::ptr::null_mut::<libc::c_void>(), std::ptr::null_mut::<libc::c_void>());
+            if rc != 0 {
+                return None;
+            }
+            // user_regs_struct layout: x86_64 rip@16 words in, rsp@19, rbp@4;
+            // aarch64 regs[0..30]=x0..x30, sp@31, pc@32, and x29 is the fp.
+            #[cfg(target_arch = "x86_64")]
+            let (pc, sp, fp) = (regs[16], regs[19], regs[4]);
+            #[cfg(target_arch = "aarch64")]
+            let (pc, sp, fp) = (regs[32], regs[31], regs[29]);
+            #[cfg(target_arch = "aarch64")]
+            let lr = regs[30];
+            #[cfg(target_arch = "x86_64")]
+            let lr = 0u64;
+            Some((pc, sp, fp, lr))
+        }
+    }
+
     pub fn read_mem(pid: i32, addr: u64, len: usize) -> Option<Vec<u8>> {
         if len == 0 || len > 1 << 20 {
             return None;
@@ -624,7 +677,7 @@ mod macos {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{collect, read_mem, socket_inode_owner};
+pub use linux::{collect, read_mem, socket_inode_owner, thread_registers};
 
 #[cfg(target_os = "macos")]
 pub use macos::collect;
@@ -644,6 +697,11 @@ pub fn socket_inode_owner(_inode: u64, _exclude: i32) -> Option<(i32, String)> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn read_mem(_pid: i32, _addr: u64, _len: usize) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn thread_registers(_tid: i32) -> Option<(u64, u64, u64, u64)> {
     None
 }
 

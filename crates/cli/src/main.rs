@@ -59,7 +59,7 @@ fn diagnose(argv: &[String], json: bool) {
     }
     let links = waitson_link::resolve(&snap);
     let py = waitson_read::python_snapshot(pid);
-    let verdict = if waitson_read::looks_go(pid) {
+    let mut verdict = if waitson_read::looks_go(pid) {
         match waitson_read::go_snapshot(pid) {
             Ok(go) => waitson_judge::judge_go(&snap, &go),
             Err(reason) => waitson_judge::go_refusal(&snap, &reason),
@@ -74,6 +74,25 @@ fn diagnose(argv: &[String], json: bool) {
     } else {
         waitson_judge::judge(&snap, &links, py.as_ref())
     };
+
+    if py.is_none()
+        && matches!(verdict.class, VerdictClass::Causal | VerdictClass::Partial)
+        && !waitson_read::looks_go(pid)
+        && !waitson_read::looks_java(pid)
+        && waitson_read::looks_js(pid).is_none()
+    {
+        if let Some(tid) = waitson_judge::subject_tid(&snap) {
+            let stoppable = snap
+                .thread(tid)
+                .is_some_and(|t| t.state == waitson_schema::TaskState::Sleeping);
+            if stoppable {
+                let frames = waitson_read::native_stack(pid, tid);
+                if frames.len() >= 2 {
+                    verdict.chain.push(format!("native stack: {}", frames.join(" ← ")));
+                }
+            }
+        }
+    }
 
     if json {
         let graph = waitson_link::waitgraph(&snap, &links);

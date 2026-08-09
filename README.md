@@ -83,7 +83,7 @@ A port target is not a network probe: waitson resolves the port to its owning lo
 Five blocks, one pass, all read-only:
 
 1. **snap** freezes the kernel's view: every thread's state and wait channel, the syscall it is parked in with its arguments, the fd table, socket tables read through the target's own network namespace (containers resolve correctly), pipe endpoints across processes.
-2. **read** opens the runtime: CPython stacks with GIL ownership and source lines read from process memory; Go goroutines with their wait reasons, offsets derived from the binary's own DWARF; JVM monitors through the JVM's own thread-dump mechanism.
+2. **read** opens the runtime: CPython stacks with GIL ownership and source lines read from process memory; Go goroutines with their wait reasons, offsets derived from the binary's own DWARF; JVM monitors through the JVM's own thread-dump mechanism; native C/C++/Rust call chains unwound from the blocked thread's frame pointers and symbolized per module.
 3. **link** crosses boundaries: futex words are read back to their owner threads, pipes to their other ends, and a blocked local socket to the process on the other side, which gets diagnosed one hop deep.
 4. **judge** walks the evidence to a verdict. Deterministic rules, no model, no guessing. The subject is the most-blocked thread, not just the main one, so an idle event loop never hides a stuck worker.
 5. **tell** prints the sentence and the chain. `--json` emits the verdict plus the full wait graph for agents and CI.
@@ -137,6 +137,7 @@ The test suite is a set of reproducible stuck programs, each with the verdict it
 | target by `:port` | resolves the owner and diagnoses it | 0.27s |
 | Go channels wedged | PARTIAL, main goroutine's wait reason named | 0.29s |
 | Go inlined call chain | frames match `runtime.Stack`, inlined calls expanded | 0.29s |
+| native C thread through libc | call chain matches the thread's own `backtrace()`, in order | measured |
 | stripped Go binary | REFUSAL, with the rebuild flag that fixes it | 0.27s |
 | Node/V8 process | REFUSAL, JS stack lives in JIT memory, reason named | 0.30s |
 | worker stuck behind an idle main thread | CAUSAL, the most-blocked thread is the story | 0.43s |
