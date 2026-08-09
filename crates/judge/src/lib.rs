@@ -141,11 +141,8 @@ pub fn python_stack(frames: &[PyFrame]) -> Vec<String> {
         .collect()
 }
 
-/// If a Python thread is running the asyncio event loop but its innermost
-/// frame is user code (not the loop's own selector wait), the loop is
-/// blocked by a synchronous call in that coroutine. Returns the coroutine
-/// frame. The caller gates this on the thread actually being blocked so a
-/// briefly-executing loop is not mistaken for a frozen one.
+/// An asyncio loop whose innermost frame is user code, not the selector
+/// wait, is blocked by a synchronous call in that coroutine. Returns it.
 pub fn async_block(frames: &[PyFrame]) -> Option<String> {
     let in_loop = frames.iter().any(|f| {
         f.filename.contains("/asyncio/")

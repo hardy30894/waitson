@@ -180,7 +180,6 @@ impl<'a> Pclntab<'a> {
         Some((file, line))
     }
 
-    /// A function name at its funcnametab offset.
     pub fn funcname(&self, nameoff: u32) -> Option<String> {
         self.cstr((self.funcname_off + nameoff as u64) as usize)
     }
