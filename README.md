@@ -56,6 +56,13 @@ Which line is stuck, the call chain that got there — inlined frames expanded a
 
 Runtimes with no supported external reader get a refusal, not a guess. A Node/V8 process (JavaScript stack in JIT memory) and a stripped Go binary both say exactly why they can't be read and what would fix it — waitson never invents a call stack it cannot see.
 
+A synchronous call on an asyncio event loop freezes every task, and waitson names the coroutine responsible from the Python stack:
+
+```
+$ waitson 41780
+waitson: pid 41780 (python3) — the asyncio event loop is frozen: a blocking call in handler (app/svc.py:88) is stalling every task
+```
+
 And when nothing is wrong, it says so, which is also an answer:
 
 ```
@@ -134,6 +141,7 @@ The test suite is a set of reproducible stuck programs, each with the verdict it
 | busy loop | OBSERVATION, source line named | 0.26s |
 | wait on a SIGSTOPped child | CAUSAL, resume command given | 0.28s |
 | idle asyncio event loop | OBSERVATION, idle by design | 0.26s |
+| asyncio loop frozen by a sync call | CAUSAL, the blocking coroutine named | 0.30s |
 | target by `:port` | resolves the owner and diagnoses it | 0.27s |
 | Go channels wedged | PARTIAL, main goroutine's wait reason named | 0.29s |
 | Go inlined call chain | frames match `runtime.Stack`, inlined calls expanded | 0.29s |

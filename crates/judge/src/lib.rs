@@ -124,6 +124,43 @@ pub fn subject_tid(s: &Snapshot) -> Option<i32> {
     choose_subject(s).map(|t| t.tid)
 }
 
+fn py_short(path: &str) -> String {
+    let p: Vec<&str> = path.rsplitn(3, '/').collect();
+    match p.as_slice() {
+        [file, dir, _] => format!("{dir}/{file}"),
+        _ => path.to_string(),
+    }
+}
+
+/// A Python call stack rendered innermost-first for a verdict.
+pub fn python_stack(frames: &[PyFrame]) -> Vec<String> {
+    frames
+        .iter()
+        .map(|f| format!("{} ({}:{})", f.name, py_short(&f.filename), f.line))
+        .take(12)
+        .collect()
+}
+
+/// If a Python thread is running the asyncio event loop but its innermost
+/// frame is user code (not the loop's own selector wait), the loop is
+/// blocked by a synchronous call in that coroutine. Returns the coroutine
+/// frame. The caller gates this on the thread actually being blocked so a
+/// briefly-executing loop is not mistaken for a frozen one.
+pub fn async_block(frames: &[PyFrame]) -> Option<String> {
+    let in_loop = frames.iter().any(|f| {
+        f.filename.contains("/asyncio/")
+            && matches!(f.name.as_str(), "_run_once" | "run_forever" | "run_until_complete" | "_run")
+    });
+    if !in_loop {
+        return None;
+    }
+    let inner = frames.first()?;
+    if inner.filename.contains("/asyncio/") || inner.filename.contains("/selectors.py") {
+        return None;
+    }
+    Some(format!("{} ({}:{})", inner.name, py_short(&inner.filename), inner.line))
+}
+
 fn choose_subject(s: &Snapshot) -> Option<&ThreadSnap> {
     let main = s.main_thread()?;
     let best = s
@@ -1165,6 +1202,47 @@ mod tests {
         };
         let v = judge_go(&snap(1, vec![]), &go);
         assert_eq!(v.class, VerdictClass::Observation);
+    }
+
+    fn pf(name: &str, file: &str, line: i32) -> PyFrame {
+        PyFrame { name: name.into(), filename: file.into(), line }
+    }
+
+    #[test]
+    fn a_blocking_call_in_a_coroutine_is_a_frozen_loop() {
+        let frames = vec![
+            pf("handler", "/app/svc.py", 12),
+            pf("main", "/app/svc.py", 20),
+            pf("_run_once", "/usr/lib/python3.11/asyncio/base_events.py", 1900),
+            pf("run_forever", "/usr/lib/python3.11/asyncio/base_events.py", 600),
+        ];
+        assert_eq!(async_block(&frames).as_deref(), Some("handler (app/svc.py:12)"));
+    }
+
+    #[test]
+    fn a_user_file_named_like_asyncio_is_not_mistaken_for_the_library() {
+        let frames = vec![
+            pf("handler", "/app/asyncio_worker.py", 7),
+            pf("_run_once", "/usr/lib/python3.11/asyncio/base_events.py", 1900),
+            pf("run_forever", "/usr/lib/python3.11/asyncio/base_events.py", 600),
+        ];
+        assert_eq!(async_block(&frames).as_deref(), Some("handler (app/asyncio_worker.py:7)"));
+    }
+
+    #[test]
+    fn a_healthy_idle_loop_is_not_flagged() {
+        let frames = vec![
+            pf("select", "/usr/lib/python3.11/selectors.py", 468),
+            pf("_run_once", "/usr/lib/python3.11/asyncio/base_events.py", 1900),
+            pf("run_forever", "/usr/lib/python3.11/asyncio/base_events.py", 600),
+        ];
+        assert_eq!(async_block(&frames), None);
+    }
+
+    #[test]
+    fn a_non_asyncio_stack_is_not_flagged() {
+        let frames = vec![pf("work", "/app/main.py", 5), pf("<module>", "/app/main.py", 40)];
+        assert_eq!(async_block(&frames), None);
     }
 
     #[test]

@@ -94,6 +94,31 @@ fn diagnose(argv: &[String], json: bool) {
         }
     }
 
+    if let (Some(pysnap), Some(tid)) = (py.as_ref(), waitson_judge::subject_tid(&snap)) {
+        if let Some(pt) = pysnap.threads.iter().find(|t| t.os_tid == Some(tid as u64)) {
+            let st = snap.thread(tid);
+            let blocked = st.is_some_and(|t| t.state == waitson_schema::TaskState::Sleeping);
+            let in_poll = st
+                .and_then(|t| t.syscall.as_ref())
+                .and_then(|s| s.name.as_deref())
+                .is_some_and(|n| matches!(n, "epoll_pwait" | "epoll_wait" | "poll" | "ppoll" | "select" | "pselect6"));
+            let stack = waitson_judge::python_stack(&pt.frames);
+            if blocked && !in_poll {
+                if let Some(coro) = waitson_judge::async_block(&pt.frames) {
+                    verdict = Verdict {
+                        class: VerdictClass::Causal,
+                        headline: format!("the asyncio event loop is frozen: a blocking call in {coro} is stalling every task"),
+                        chain: stack.clone(),
+                        evidence: vec!["the loop thread is in a blocking syscall inside a coroutine, not the event selector".into()],
+                    };
+                }
+            }
+            if !verdict.chain.iter().any(|l| l.contains("python stack")) && stack.len() >= 2 {
+                verdict.chain.push(format!("python stack: {}", stack.join(" ← ")));
+            }
+        }
+    }
+
     if json {
         let graph = waitson_link::waitgraph(&snap, &links);
         let payload = serde_json::json!({ "verdict": verdict, "graph": graph });

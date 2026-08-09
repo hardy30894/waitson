@@ -31,6 +31,7 @@ SCENARIOS = [
     ("busyloop", [sys.executable, "scenarios/busyloop.py"], "OBSERVATION", [["busy"]], None),
     ("childwait", [sys.executable, "scenarios/childwait.py"], "CAUSAL", [["stopped"]], None),
     ("epollidle", [sys.executable, "scenarios/epollidle.py"], "OBSERVATION", [["idle"], ["asyncio"]], None),
+    ("asyncioblock", [sys.executable, "scenarios/asyncioblock.py"], "CAUSAL", [["event loop is frozen"], ["handler"]], None),
     ("porttarget", [sys.executable, "scenarios/slowdb.py"], "OBSERVATION", [["sleep"]], ":5432"),
     ("gochan", [f"{BUILD}/gochan"], "PARTIAL", [["goroutine"], ["chan receive"], ["gochan.go:"]], None),
     ("gostripped", [f"{BUILD}/gostripped"], "REFUSAL", [["stripped"]], None),
