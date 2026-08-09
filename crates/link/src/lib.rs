@@ -1,8 +1,7 @@
 use waitson_schema::*;
 
-/// One hop across the wire: if the subject is blocked on a local socket,
-/// find the process on the other end and diagnose it too (depth 1, no
-/// further hops from the peer).
+/// Diagnose the process on the other end of the blocked local socket;
+/// one hop, the peer gets no further hops.
 pub fn resolve(s: &Snapshot) -> Links {
     let mut links = Links::default();
     let Some(inode) = waitson_judge::blocking_socket_inode(s) else {

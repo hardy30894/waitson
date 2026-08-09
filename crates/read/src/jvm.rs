@@ -1,6 +1,4 @@
-//! JVM thread dumps via jstack, the JVM's own supported external mechanism.
-//! Parsing stays separate from judging: this file produces facts, the judge
-//! finds the monitor cycle.
+//! JVM thread dumps via jstack; parsing here, cycle detection in the judge.
 use std::process::Command;
 use waitson_schema::{JvmSnapshot, JvmThread};
 

@@ -1,11 +1,8 @@
-//! Go's own line tables. Every Go binary carries gopclntab so its runtime
-//! can print stack traces; parsing it maps any pc to function, file, and
-//! line with nothing guessed. Formats 1.18 (0xFFFFFFF0) and 1.20+
-//! (0xFFFFFFF1) share every field read here.
+//! gopclntab: pc to function/file/line. Magic 0xFFFFFFF0 is the 1.18
+//! layout, 0xFFFFFFF1 the 1.20 one.
 pub struct Pclntab<'a> {
     data: &'a [u8],
-    // The go:func.* region, where inline trees live; funcdata offsets are
-    // relative to its base. Absent means inline expansion is skipped.
+    // go:func.* bytes; inline trees live here. Absent skips expansion.
     gofunc: Option<&'a [u8]>,
     quantum: u64,
     nfunc: u64,
@@ -15,13 +12,10 @@ pub struct Pclntab<'a> {
     filetab_off: u64,
     pctab_off: u64,
     pcln_off: u64,
-    // The fixed runtime._func size before its pcdata/funcdata arrays: 40
-    // bytes before Go 1.20, 44 after (startLine was inserted). Read from the
-    // magic so the arrays are found at the right place either way.
+    // runtime._func fixed part: 40 bytes pre-1.20, 44 after (startLine).
     func_struct_size: usize,
-    // runtime.inlinedCall changed shape at Go 1.20: pre-1.20 it is 20 bytes
-    // with the name offset at +12 and parentPc at +16; 1.20+ is 16 bytes
-    // with them at +4 and +8. The pclntab magic tells the two apart.
+    // runtime.inlinedCall: pre-1.20 20 bytes, name +12, parentPc +16;
+    // 1.20+ 16 bytes, +4 and +8.
     inlinedcall_size: usize,
     ic_nameoff: usize,
     ic_parentpc: usize,
@@ -86,8 +80,7 @@ impl<'a> Pclntab<'a> {
         Some(u32::from_le_bytes(self.data.get(off..off + 4)?.try_into().ok()?))
     }
 
-    /// The frame size (sp delta) a function has grown at a given pc, from
-    /// the pcsp table: what the runtime's own unwinder consults.
+    /// Frame size at pc, from the pcsp table.
     pub fn sp_delta(&self, pc: u64) -> Option<i64> {
         let rel = pc.checked_sub(self.text_start)?;
         let (func_entry, fi) = self.func_at(rel)?;
@@ -114,9 +107,8 @@ impl<'a> Pclntab<'a> {
         Some((name, file, line))
     }
 
-    /// pc -> the full source frame list innermost-first, expanding inlined
-    /// calls the way the runtime's own traceback does. A pc with no inlining
-    /// yields exactly the one physical frame that `resolve` returns.
+    /// All source frames at pc innermost-first, inlined calls expanded;
+    /// no inlining yields the single physical frame.
     pub fn resolve_frames(&self, pc: u64) -> Vec<(String, String, u32)> {
         self.resolve_frames_inner(pc).unwrap_or_else(|| {
             self.resolve(pc)
@@ -199,8 +191,8 @@ impl<'a> Pclntab<'a> {
         Some(String::from_utf8_lossy(&rest[..end]).into_owned())
     }
 
-    // The pcvalue tables encode (value delta zigzag, pc delta) runs from
-    // value -1 at the function entry, in units of the pc quantum.
+    // pcvalue: (zigzag value delta, pc delta) runs from -1 at the entry,
+    // pc deltas in quantum units.
     fn pcvalue(&self, off: u64, func_entry: u64, target: u64) -> Option<i64> {
         if off == 0 {
             return None;

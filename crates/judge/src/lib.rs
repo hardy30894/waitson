@@ -19,9 +19,8 @@ fn classify(t: &ThreadSnap) -> Wait<'_> {
         return Wait::Run;
     }
     if t.state == TaskState::DiskSleep {
-        // The vfork completion wait shows wchan vfork_done on older kernels and
-        // kernel_clone on newer ones (the wait was inlined); a persistent D sleep
-        // there is the vfork wait, nothing else sleeps long inside clone.
+        // vfork wait wchan: vfork_done on older kernels, kernel_clone after
+        // inlining; nothing else sleeps long inside clone.
         return if t.wchan.contains("vfork") || t.wchan.contains("kernel_clone") {
             Wait::Vfork
         } else {
@@ -107,9 +106,7 @@ fn decapitalize(s: &str) -> String {
     }
 }
 
-// How stuck a thread looks; the most-blocked thread is the story, and the
-// main thread only wins ties. A busy or parked thread is never the story
-// while a sibling is pinned on a lock, an fd, or the kernel.
+// Most-blocked thread wins; main only breaks ties.
 fn interest(w: &Wait) -> u8 {
     match w {
         Wait::Vfork | Wait::Disk(_) => 6,
@@ -131,8 +128,7 @@ fn choose_subject(s: &Snapshot) -> Option<&ThreadSnap> {
     Some(if interest(&classify(best)) > interest(&classify(main)) { best } else { main })
 }
 
-/// Which socket inode the subject is actually blocked on, if any.
-/// LINK uses this to hop only where the evidence points.
+/// The socket inode the subject is blocked on, for the link hop.
 pub fn blocking_socket_inode(s: &Snapshot) -> Option<u64> {
     let subject = choose_subject(s)?;
     if let Wait::OnFd { fd, .. } = classify(subject) {
@@ -500,9 +496,7 @@ fn vfork_wait(s: &Snapshot, subject: &ThreadSnap) -> Verdict {
 }
 
 fn running(s: &Snapshot, py: Option<&PySnapshot>, subject: &ThreadSnap) -> Verdict {
-    // 100 Hz ticks: delta * 10ms against the sampling window gives cpu share,
-    // clamped to the physical ceiling of 100% per thread (tick quantization
-    // can otherwise read a hair over).
+    // Ticks are 100 Hz; clamp at 100% per thread, quantization reads over.
     let total: u64 = s.threads.iter().map(|t| t.cpu_delta).sum();
     let pct = ((total * 1000) / s.window_ms.max(1)).min(s.threads.len() as u64 * 100);
     let frame = top_py_frame(py, subject.tid)
@@ -586,8 +580,7 @@ fn polling(s: &Snapshot, py: Option<&PySnapshot>, subject: &ThreadSnap) -> Verdi
     )
 }
 
-/// The JVM names its own monitors: a cycle in the blocked-on graph read
-/// from a thread dump is a deadlock by the JVM's own account.
+/// A cycle in the thread dump's blocked-on graph is a deadlock.
 pub fn judge_jvm(_s: &Snapshot, jvm: &JvmSnapshot) -> Verdict {
     use std::collections::BTreeMap;
     let mut owner_of: BTreeMap<&str, &str> = BTreeMap::new();
@@ -655,12 +648,22 @@ pub fn judge_jvm(_s: &Snapshot, jvm: &JvmSnapshot) -> Verdict {
     )
 }
 
-/// V8 keeps its JavaScript call stack in JIT-managed memory with no stable
-/// external layout and no supported out-of-process reader (unlike CPython
-/// and Go). A kernel-level verdict on the event loop would miss the JS
-/// cause, so waitson refuses rather than mislead — the honest state until a
-/// V8 reader exists.
-pub fn node_refusal(s: &Snapshot) -> Verdict {
+/// A parked JS runtime is unreadable (JIT stacks, no external layout);
+/// kernel-visible waits still get a verdict, only the parked case refuses.
+pub fn judge_js(s: &Snapshot, links: &Links, runtime: &str, engine: &str) -> Verdict {
+    let kernel_story = s
+        .main_thread()
+        .and_then(|_| choose_subject(s))
+        .map(|t| {
+            matches!(
+                classify(t),
+                Wait::OnFd { .. } | Wait::FileLock | Wait::Futex { owner: Some(_) } | Wait::Child | Wait::Vfork | Wait::Disk(_) | Wait::Run
+            )
+        })
+        .unwrap_or(false);
+    if kernel_story {
+        return judge(s, links, None);
+    }
     let mut seen: Vec<String> = s
         .threads
         .iter()
@@ -673,10 +676,12 @@ pub fn node_refusal(s: &Snapshot) -> Verdict {
     }
     verdict(
         VerdictClass::Refusal,
-        "a Node/V8 runtime: the JavaScript stack lives in JIT memory with no external reader yet, so the event-loop kernel view cannot name the JS cause — refusing rather than guessing".into(),
+        format!(
+            "a {runtime} runtime whose story is in JavaScript: the JS stack lives in {engine}'s JIT memory with no external reader, and a wedged callback looks identical to a healthy idle loop from outside — refusing rather than guessing"
+        ),
         vec![
-            "the libuv event loop thread is almost always parked in epoll; that tells you nothing about which callback is stuck".into(),
-            "the kernel-level facts gathered anyway are in the evidence".into(),
+            "every thread is parked the way an idle event loop parks; nothing at the kernel layer names a cause".into(),
+            "a kernel-visible wait (blocked fd, held lock, stuck child) would have produced a verdict instead".into(),
         ],
         seen,
     )
@@ -696,9 +701,8 @@ pub fn jvm_refusal(s: &Snapshot, reason: &str) -> Verdict {
     )
 }
 
-/// Go parks every blocked goroutine behind the netpoller, so kernel-level
-/// facts cannot distinguish a stuck Go program from an idle one. When the
-/// goroutine layer cannot be read, refusing beats guessing.
+/// Kernel facts cannot tell a stuck Go program from an idle one
+/// (goroutines park behind the netpoller); unreadable means refuse.
 pub fn go_refusal(s: &Snapshot, reason: &str) -> Verdict {
     let seen: Vec<String> = s
         .threads
@@ -718,8 +722,6 @@ pub fn go_refusal(s: &Snapshot, reason: &str) -> Verdict {
     )
 }
 
-/// The goroutine layer is the truth for Go: statuses and wait reasons come
-/// from the runtime's own state, read out of process memory.
 pub fn judge_go(_s: &Snapshot, go: &GoSnapshot) -> Verdict {
     let internal = |r: &str| {
         r.starts_with("chan ")
@@ -728,9 +730,8 @@ pub fn judge_go(_s: &Snapshot, go: &GoSnapshot) -> Verdict {
             || r.starts_with("semacquire")
             || r.starts_with("wait for GC")
     };
-    // Runtime housekeeping goroutines (GC helpers, finalizers) park in every
-    // Go program; counting them would make the all-internal deadlock rule
-    // unreachable. goid 1 stays: the main goroutine's func is runtime.main.
+    // GC/finalizer goroutines park in every Go program and would make the
+    // all-internal deadlock rule unreachable; goid 1 is runtime.main, kept.
     let user: Vec<&GoRoutine> = go
         .goroutines
         .iter()
@@ -1126,6 +1127,30 @@ mod tests {
         };
         let v = judge_go(&snap(1, vec![]), &go);
         assert_eq!(v.class, VerdictClass::Observation);
+    }
+
+    #[test]
+    fn parked_js_runtime_refuses_with_the_engine_named() {
+        let s = snap(1, vec![thread(1, TaskState::Sleeping, "ep_poll", Some(("epoll_pwait", [0; 6])), None)]);
+        let v = judge_js(&s, &Links::default(), "Bun", "JavaScriptCore");
+        assert_eq!(v.class, VerdictClass::Refusal);
+        assert!(v.headline.contains("Bun"));
+        assert!(v.headline.contains("JavaScriptCore"));
+    }
+
+    #[test]
+    fn kernel_visible_wait_in_a_js_runtime_still_gets_a_verdict() {
+        let mut s = snap(1, vec![thread(
+            1,
+            TaskState::Sleeping,
+            "pipe_read",
+            Some(("read", [0, 0, 0, 0, 0, 0])),
+            None,
+        )]);
+        s.fds = vec![FdEntry { fd: 0, kind: FdKind::Pipe { inode: 7 }, flags: 0 }];
+        let v = judge_js(&s, &Links::default(), "Node", "V8");
+        assert_ne!(v.class, VerdictClass::Refusal);
+        assert!(v.headline.contains("pipe"));
     }
 
     #[test]

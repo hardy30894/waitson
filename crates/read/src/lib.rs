@@ -38,8 +38,14 @@ fn looks_python(pid: i32) -> bool {
     exe_name(pid).is_some_and(|f| f.contains("python"))
 }
 
-pub fn looks_node(pid: i32) -> bool {
-    exe_name(pid).is_some_and(|f| f == "node" || f == "nodejs")
+/// JS runtime and its engine; JIT stacks have no external reader.
+pub fn looks_js(pid: i32) -> Option<(&'static str, &'static str)> {
+    match exe_name(pid)?.as_str() {
+        "node" | "nodejs" => Some(("Node", "V8")),
+        "bun" => Some(("Bun", "JavaScriptCore")),
+        "deno" => Some(("Deno", "V8")),
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -56,8 +62,7 @@ fn exe_name(pid: i32) -> Option<String> {
         .and_then(|p| std::path::Path::new(&p).file_name().map(|f| f.to_string_lossy().to_string()))
 }
 
-/// Every Go binary embeds a "Go buildinf:" block near the front of the
-/// image; 4MB covers it in practice without reading a whole large binary.
+/// "Go buildinf:" sits near the front of every Go binary; 4MB covers it.
 pub fn looks_go(pid: i32) -> bool {
     use std::io::Read;
     let Ok(mut f) = std::fs::File::open(format!("/proc/{pid}/exe")) else {

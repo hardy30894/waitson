@@ -160,9 +160,8 @@ mod linux {
         out
     }
 
-    // glibc pthread_mutex_t layout: __lock (the futex word) at +0, __owner tid at +8.
-    // A garbage read (condvar futexes, other libcs) is rejected by the caller's
-    // "owner must be a thread of this process" check.
+    // glibc pthread_mutex_t: __lock (the futex word) at +0, __owner tid at
+    // +8. Garbage reads fail the caller's owner-is-a-thread check.
     fn read_futex_owner(pid: i32, uaddr: u64) -> Option<i32> {
         let mut buf = [0u8; 4];
         let local = libc::iovec {
@@ -223,8 +222,7 @@ mod linux {
         out
     }
 
-    // Read the socket table through the target's own /proc entry: for a
-    // containerized pid that is its network namespace, not the host's.
+    // The target's own /proc net tables, so a container netns resolves.
     fn collect_sockets(pid: i32) -> BTreeMap<u64, SocketConn> {
         let mut out = BTreeMap::new();
         for (proto, file) in [("tcp", "tcp"), ("tcp", "tcp6"), ("udp", "udp"), ("udp", "udp6")] {
@@ -338,9 +336,8 @@ mod linux {
         None
     }
 
-    // /proc/locks names both sides of every file-lock wait: a "->" row is a
-    // waiter, the plain row on the same dev:inode is the holder. The path is
-    // recovered by matching the inode against the holder's own fd table.
+    // In /proc/locks a "->" row is a waiter; the plain row on the same
+    // dev:inode is the holder. Path recovered from the holder's fd table.
     fn collect_lock_holders(pid: i32) -> Vec<LockHolder> {
         let Some(body) = read("/proc/locks".to_string()) else {
             return Vec::new();
@@ -397,8 +394,7 @@ mod linux {
         let before = thread_ticks(pid);
         let started = std::time::Instant::now();
         thread::sleep(Duration::from_millis(window_ms));
-        // cpu share is computed against the window; use the real elapsed time,
-        // not the nominal sleep, or tick quantization reads as >100% busy.
+        // Real elapsed time, or tick quantization reads over 100% busy.
         let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
 
         let mut threads = Vec::new();
@@ -489,10 +485,8 @@ mod macos {
     use std::thread;
     use std::time::Duration;
 
-    // macOS exposes thread run states, cpu time, and socket endpoints to a
-    // same-user caller through libproc; wait *causes* need task_for_pid
-    // (root). This tier maps what is readable into the same Snapshot and
-    // lets the judge refuse honestly where the cause is invisible.
+    // libproc gives a same-user caller thread states, cpu, and sockets;
+    // wait causes need task_for_pid (root).
     fn state_of(run_state: i32) -> TaskState {
         match run_state {
             1 => TaskState::Running,
@@ -597,9 +591,8 @@ mod macos {
             let Ok(t) = pidinfo::<ThreadInfo>(pid, *tid) else { continue };
             let ticks = (t.pth_user_time + t.pth_system_time) / 10_000_000;
             threads.push(ThreadSnap {
-                // The subject-selection contract keys the main thread by
-                // tid == pid; macOS thread ids are unrelated, so the first
-                // thread carries the pid and the rest keep their ids.
+                // Subject selection keys main by tid == pid; macOS thread
+                // ids are unrelated, so the first thread carries the pid.
                 tid: if i == 0 { pid } else { *tid as i32 },
                 comm: comm.clone(),
                 state: state_of(t.pth_run_state),

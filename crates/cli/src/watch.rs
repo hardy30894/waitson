@@ -1,6 +1,4 @@
-//! Resident sentinel: sweeps kernel facts on a cadence and diagnoses a
-//! process at the moment it turns stuck, once, when it happens. Nothing is
-//! attached until something crosses the same triage rules scan uses.
+//! Sweeps on a cadence; diagnoses a new suspect once, at onset.
 use std::collections::BTreeSet;
 use std::io::Write;
 

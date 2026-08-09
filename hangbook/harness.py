@@ -37,7 +37,9 @@ SCENARIOS = [
     ("threadstuck", [sys.executable, "scenarios/threadstuck.py"], "CAUSAL", [["9009"], ["sleep"], ["most-blocked"]], None),
     ("flocked", [sys.executable, "scenarios/flocked.py"], "CAUSAL", [["file lock"], ["held by"], ["lockfile"]], None),
     ("jdeadlock", ["java", "-cp", BUILD, "Deadlock"], "CAUSAL", [["java-level deadlock"], ["left"], ["right"]], None),
-    ("nodehang", ["node", "scenarios/nodehang.js"], "REFUSAL", [["node/v8"], ["jit"]], None),
+    ("nodehang", ["node", "scenarios/nodehang.js"], "REFUSAL", [["node"], ["jit"]], None),
+    ("nodeblocked", ["node", "scenarios/nodeblocked.js"], "CAUSAL", [["pipe"], ["held by"]], None),
+    ("bunhang", ["bun", "scenarios/nodehang.js"], "REFUSAL", [["bun"], ["javascriptcore"]], None),
 ]
 
 
@@ -76,8 +78,10 @@ def read_ready(proc, timeout=10.0):
 
 
 def run_one(name, cmd, expected, needles, target_override):
+    # stdin is a held-open pipe so scenarios that block reading it stay blocked.
     proc = subprocess.Popen(
-        cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True
+        cmd, cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, start_new_session=True,
     )
     row = {"name": name, "expected": expected, "passed": False}
     try:

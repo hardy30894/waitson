@@ -1,6 +1,4 @@
-//! Fleet triage in two phases: a no-attach sweep over kernel facts flags
-//! the processes that look stuck in anger, then only those suspects get
-//! the full attach pipeline. Everything parked-and-healthy stays untouched.
+//! Two-phase triage: a no-attach sweep flags suspects, only those attach.
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -10,8 +8,7 @@ pub(crate) struct Sample {
     comm: String,
 }
 
-// Stuck in anger means: uninterruptible the whole window, or a core burned
-// across it (>=30 of the ~40 ticks a 400ms window holds, i.e. 75%).
+// Suspect: D across the window, or >=30 of its ~40 ticks (75%) burned.
 pub(crate) fn suspects(
     first: &BTreeMap<i32, Sample>,
     second: &BTreeMap<i32, Sample>,
@@ -28,9 +25,8 @@ pub(crate) fn suspects(
     out
 }
 
-// A tcp receive queue that stays loaded across the window while its owner
-// never drains it is the relational signal: someone is waiting ON this
-// process. udp queues are excluded; they idle nonzero legitimately.
+// tcp rx bytes persisting across the window mean the owner is not reading;
+// udp idles nonzero legitimately.
 pub(crate) fn rx_map() -> BTreeMap<u64, u64> {
     let mut sockets = BTreeMap::new();
     for file in ["tcp", "tcp6"] {
@@ -125,7 +121,7 @@ pub(crate) fn sweep(me: i32) -> BTreeMap<i32, Sample> {
         if pid == me {
             continue;
         }
-        // Kernel threads have an empty cmdline; they are the kernel's business.
+        // Kernel threads have no cmdline.
         match fs::read_to_string(format!("/proc/{pid}/cmdline")) {
             Ok(c) if !c.is_empty() => {}
             _ => continue,

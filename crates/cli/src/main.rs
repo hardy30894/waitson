@@ -45,8 +45,8 @@ fn diagnose(argv: &[String], json: bool) {
             Ok(jvm) => waitson_judge::judge_jvm(&snap, &jvm),
             Err(reason) => waitson_judge::jvm_refusal(&snap, &reason),
         }
-    } else if waitson_read::looks_node(pid) {
-        waitson_judge::node_refusal(&snap)
+    } else if let Some((runtime, engine)) = waitson_read::looks_js(pid) {
+        waitson_judge::judge_js(&snap, &links, runtime, engine)
     } else {
         waitson_judge::judge(&snap, &links, py.as_ref())
     };
@@ -75,9 +75,8 @@ fn cmd_judge(json: bool) {
     }
     let snap: Snapshot = serde_json::from_str(&body)
         .unwrap_or_else(|e| die(&format!("waitson judge: stdin is not a snap: {e}")));
-    // Offline judging: the snap already carries pipe peers and lock holders,
-    // but the live-only enrichments (socket hop, runtime readers) need the
-    // process, so an offline verdict can be broader than a live one.
+    // The snap carries pipe peers and lock holders; the socket hop and
+    // runtime readers need the live process.
     let verdict = waitson_judge::judge(&snap, &Links::default(), None);
     if json {
         println!("{}", serde_json::to_string_pretty(&verdict).unwrap());
@@ -118,8 +117,7 @@ fn exit_by_class(v: &Verdict) -> ! {
     exit(if v.class == VerdictClass::Refusal { 1 } else { 0 })
 }
 
-/// The argument is whatever the user actually knows: a pid, a process
-/// name, or :port for whoever owns that port on this machine.
+/// pid, process name, or :port.
 fn resolve_target(arg: &str) -> Result<i32, String> {
     if let Ok(pid) = arg.parse::<i32>() {
         return Ok(pid);

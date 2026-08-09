@@ -1,7 +1,5 @@
-//! Reads goroutines from a live Go process with no per-version tables:
-//! struct offsets come from the binary's own DWARF, wait-reason names from
-//! the runtime's own waitReasonStrings, so any Go the binary was built with
-//! describes itself.
+//! Goroutines from a live process. Struct offsets come from the binary's
+//! own DWARF, wait reasons from the runtime's own tables.
 use std::borrow::Cow;
 use std::collections::HashMap;
 use object::{Object, ObjectSection, ObjectSymbol};
@@ -49,9 +47,7 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
         reasons_sym.ok_or("no runtime.waitReasonStrings symbol (stripped binary)")?;
     funcs.sort_by_key(|(a, _, _)| *a);
 
-    // PIE binaries land at an ASLR base; the bias between the mapped base
-    // and the ELF's lowest load address relocates every symbol. Non-PIE
-    // binaries derive a bias of zero from the same arithmetic.
+    // ASLR bias = mapped base minus lowest PT_LOAD vaddr; non-PIE derives zero.
     let bias = load_bias(pid, &file)?;
     let allgs_addr = allgs_addr.wrapping_add(bias);
     let reasons_addr = reasons_addr.wrapping_add(bias);
@@ -62,8 +58,7 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
         .section_by_name(".gopclntab")
         .or_else(|| file.section_by_name("__gopclntab"))
         .and_then(|s| s.uncompressed_data().ok());
-    // go:func.* is the base the inline-tree funcdata offsets are measured
-    // from; slice the section that contains it so inline frames resolve.
+    // Inline-tree funcdata offsets are relative to go:func.*.
     let gofunc_section = gofunc_addr.and_then(|addr| {
         file.sections()
             .find(|s| addr >= s.address() && addr < s.address() + s.size())
@@ -114,8 +109,7 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
         };
         let startpc = u64le(&startpc_b).wrapping_sub(bias);
         let gopc = u64le(&gopc_b).wrapping_sub(bias);
-        // gopc is the return address after the go statement; backing up one
-        // byte lands inside the call itself, the addr2line convention.
+        // gopc is a return address; pc-1 lands inside the call (addr2line).
         let source = pcln
             .as_ref()
             .and_then(|t| t.resolve(startpc))
@@ -124,8 +118,7 @@ pub fn go_snapshot(pid: i32) -> Result<GoSnapshot, String> {
             .as_ref()
             .and_then(|t| t.resolve(gopc.wrapping_sub(1)))
             .map(|(name, file, line)| format!("{name} ({}:{line})", short_path(&file)));
-        // sched is only trustworthy for parked goroutines; a running one
-        // left stale values behind.
+        // sched is stale unless the goroutine is parked.
         let stack = if status == 4 {
             (|| -> Option<Vec<String>> {
                 let sched = g + off.sched;
@@ -180,11 +173,9 @@ fn load_bias(pid: i32, file: &object::File) -> Result<u64, String> {
     Ok(base.wrapping_sub(min_vaddr))
 }
 
-// The runtime's own unwind rules, replayed from outside: the pcsp table
-// gives each frame's size; on arm64 the saved return address sits at the
-// frame's lowest word (LR still in gobuf for size-zero leaves), on x86_64
-// it sits above the frame where CALL pushed it. runtime.goexit is the
-// bottom of every goroutine stack.
+// arm64 saves the return address at the frame's lowest word (gobuf.lr for
+// zero-size leaves); x86_64 has it above the frame where CALL pushed it.
+// runtime.goexit ends every goroutine stack.
 fn unwind(pid: i32, pcln: &crate::pclntab::Pclntab, bias: u64, mut pc: u64, mut sp: u64, lr: u64) -> Vec<String> {
     let mut out = Vec::new();
     for i in 0..32 {
@@ -193,8 +184,6 @@ fn unwind(pid: i32, pcln: &crate::pclntab::Pclntab, bias: u64, mut pc: u64, mut 
         if phys == "runtime.goexit" || phys.is_empty() {
             break;
         }
-        // One physical frame expands to every source frame inlined into it,
-        // innermost first, matching the runtime's own traceback.
         for (name, file, line) in pcln.resolve_frames(lookup) {
             out.push(format!("{name} ({}:{line})", short_path(&file)));
         }
@@ -248,8 +237,8 @@ fn func_name(funcs: &[(u64, u64, String)], pc: u64) -> String {
     "?".into()
 }
 
-// waitReasonStrings is a fixed [N]string, so the symbol's own byte size is
-// the count: N string headers of 16 bytes each, entry 0 the empty string.
+// waitReasonStrings is a fixed [N]string: symbol size / 16 = N string
+// headers, entry 0 the empty string.
 fn read_wait_reasons(pid: i32, addr: u64, size: u64) -> Result<Vec<String>, String> {
     let len = (size / 16).clamp(1, 256) as usize;
     let heads = mem(pid, addr, len * 16)?;
